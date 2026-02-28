@@ -3,11 +3,10 @@ mcp[cli]>=1.26.0
 uvicorn
 fastapi
 
-# ── LangChain ecosystem ───────────────────────────────────────────
+# ── LangChain ecosystem (embeddings + text splitters only) ────────
 langchain-core
 langchain-text-splitters
 langchain-huggingface
-langchain-google-genai
 langchain-community
 
 # ── Embeddings & reranking ────────────────────────────────────────

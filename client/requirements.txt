@@ -1,0 +1,13 @@
+# Client — LangChain Agent with MCP Tools
+# ─────────────────────────────────────────
+# Install:  pip install -r requirements.txt
+# Run:      python agent.py
+#
+# This is a SEPARATE process that connects to
+# the running MCP server and uses its tools via
+# an LLM agent (Gemini / OpenAI / etc.).
+
+langchain
+langchain-google-genai
+langchain-mcp-adapters
+python-dotenv
