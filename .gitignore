@@ -26,6 +26,9 @@ ENV/
 *.swo
 *~
 
+# ── Docs ──────────────────────────────────────────────────────────
+docs/
+
 # ── Logs & temp files ─────────────────────────────────────────────
 *.log
 system.log
@@ -50,3 +53,5 @@ desktop.ini
 *.pt
 *.onnx
 *.safetensors
+
+/docs
