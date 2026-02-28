@@ -1,0 +1,41 @@
+# ── MCP Server ─────────────────────────────────────────────────────
+mcp[cli]>=1.26.0
+uvicorn
+fastapi
+
+# ── LangChain ecosystem ───────────────────────────────────────────
+langchain-core
+langchain-text-splitters
+langchain-huggingface
+langchain-google-genai
+langchain-community
+
+# ── Embeddings & reranking ────────────────────────────────────────
+sentence-transformers
+torch
+
+# ── Document processors ──────────────────────────────────────────
+PyMuPDF           # fitz — PDF extraction
+python-docx       # DOCX extraction
+python-pptx       # PPTX extraction
+openpyxl          # XLSX support for pandas
+pandas
+numpy
+tabulate          # DataFrame formatting
+
+# ── Image / OCR ──────────────────────────────────────────────────
+Pillow
+pytesseract
+
+# ── Web / HTML ───────────────────────────────────────────────────
+beautifulsoup4
+requests
+
+# ── Language detection ───────────────────────────────────────────
+langdetect
+
+# ── Misc ─────────────────────────────────────────────────────────
+python-dotenv
+
+# ── Vector store ─────────────────────────────────────────────────
+faiss-cpu         # use faiss-gpu if CUDA is available

@@ -1,0 +1,52 @@
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ──────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Environment & secrets ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── IDE / Editor ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs & temp files ─────────────────────────────────────────────
+*.log
+system.log
+request_logs/
+mcp_server/request_logs/
+temp_files/
+mcp_server/temp_files/
+
+# ── Testing / coverage ───────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+.tox/
+
+# ── OS files ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── ML models (large files — download at runtime) ────────────────
+*.bin
+*.pt
+*.onnx
+*.safetensors
