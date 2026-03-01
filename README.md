@@ -20,18 +20,29 @@ Two access modes:
          │                            │
          └──────────┬─────────────────┘
                     ▼
-┌──────────────────────────────────────────────────────┐
-│             Shared Service Layer                     │
-│  ┌────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │ Middleware  │→ │  Services    │→ │ Processors  │  │
-│  │ auth, rate │  │ cache, chunk │  │ PDF, DOCX,  │  │
-│  │ limit, log │  │ download,    │  │ PPTX, XLSX, │  │
-│  │ timeout    │  │ retrieval    │  │ CSV, Image   │  │
-│  └────────────┘  └──────────────┘  └─────────────┘  │
-│                                                      │
-│  Models: MiniLM · BGE · Cross-Encoder (no LLM)      │
-│  13 MCP Tools · Eager model loading at startup       │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  Middleware (guarded decorator / HTTP middleware)   │  │
+│  │  request-id · auth · rate-limit · timeout · logging│  │
+│  └──────────────────────┬─────────────────────────────┘  │
+│                         ▼                                │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  13 MCP Tools · 2 MCP Resources                  │    │
+│  │  query (4) · extract (6) · utility (3)           │    │
+│  └──────────────────────┬───────────────────────────┘    │
+│                         ▼                                │
+│  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐   │
+│  │  Services   │ │  Processors  │ │  Core            │   │
+│  │  cache,     │ │  PDF, DOCX,  │ │  config, errors, │   │
+│  │  chunking,  │ │  PPTX, XLSX, │ │  logging, models │   │
+│  │  download,  │ │  CSV, Image, │ │  schemas         │   │
+│  │  retrieval, │ │  HTML, TXT,  │ │                  │   │
+│  │  language   │ │  URL         │ │                  │   │
+│  └─────────────┘ └──────────────┘ └──────────────────┘   │
+│                                                          │
+│  Models: MiniLM · BGE · Cross-Encoder (no LLM)          │
+│  13 MCP Tools · 2 Resources · Eager model load at start  │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -46,68 +57,97 @@ graph TB
         C2["AI Agent + LLM<br/>(Claude / Copilot / LangChain)"]
     end
 
-    subgraph Server["RAG Document Server (no LLM)"]
+    subgraph Server["RAG Document Server v2.0 (no LLM)"]
         direction TB
 
-        subgraph Transport["Transport Layer"]
-            REST["REST API<br/>FastAPI · /api/*"]
-            MCP["MCP Protocol<br/>FastMCP · /mcp"]
+        subgraph Transport["Transport Layer (__main__.py)"]
+            REST["REST API<br/>FastAPI · /api/*<br/>(api.py)"]
+            MCP["MCP Protocol<br/>FastMCP · /mcp<br/>(server.py · _asgi.py)"]
         end
 
-        subgraph MW["Middleware"]
-            AUTH["Authentication<br/>x-api-key header"]
-            RL["Rate Limiting<br/>Token bucket · 60 rpm"]
-            VAL["Input Validation<br/>URL, text"]
-            LOG["Structured Logging<br/>Request ID · JSON"]
-            TO["Timeout<br/>30s – 300s per tool"]
+        subgraph MW["Middleware (middleware/)"]
+            REST_MW["REST HTTP Middleware<br/>Request-ID · Auth · Rate Limit"]
+            GUARD["guarded() Decorator<br/>Request-ID · Auth · Rate Limit<br/>Timeout · Structured Logging<br/>Error→dict conversion"]
+            GUARDS["guards.py<br/>check_auth · check_rate_limit<br/>validate_url · validate_text"]
         end
 
-        subgraph Services["Service Layer"]
+        subgraph ToolsGroup["Tools (tools/) — 13 MCP Tools"]
+            direction LR
+            T_Q["query.py (4)<br/>process_document<br/>chunk_document<br/>retrieve_chunks<br/>query_spreadsheet"]
+            T_E["extract.py (6)<br/>extract_pdf_text<br/>extract_docx_text<br/>extract_pptx_text<br/>extract_xlsx_tables<br/>extract_csv_tables<br/>extract_image_text"]
+            T_U["utility.py (3)<br/>detect_language<br/>get_system_health<br/>manage_cache"]
+        end
+
+        subgraph Res["MCP Resources (resources/)"]
+            R1["rag://supported-formats"]
+            R2["rag://tool-descriptions"]
+        end
+
+        subgraph Services["Service Layer (services/)"]
             DL["Downloader<br/>HTTP · 3× retry"]
-            CACHE["3-Layer Cache<br/>Download · Document<br/>Retriever · 30min TTL"]
-            CHUNK["Chunking<br/>Adaptive sizes<br/>Importance scoring"]
-            RET["Retrieval<br/>FAISS vector search<br/>Cross-encoder rerank"]
-            LANG["Language Detection<br/>Multi-round sampling"]
+            CACHE["3-Layer TTL Cache<br/>Download · Document<br/>Retriever · 30min TTL"]
+            CHUNK["Adaptive Chunking<br/>Type-aware sizes<br/>Importance scoring"]
+            RET["Enhanced Retrieval<br/>FAISS vector search<br/>Cross-encoder rerank<br/>Diversity filter"]
+            LANG["Language Detection<br/>Multi-round sampling<br/>langdetect"]
         end
 
-        subgraph Processors["Document Processors"]
+        subgraph Processors["Document Processors (processors/)"]
             PDF["PDF<br/>PyMuPDF"]
             DOCX["DOCX<br/>python-docx"]
             PPTX["PPTX<br/>python-pptx"]
             XLSX["XLSX/CSV<br/>pandas + openpyxl"]
             IMG["Image OCR<br/>pytesseract"]
-            URL_P["URL<br/>BeautifulSoup"]
+            HTML_P["HTML/TXT<br/>BeautifulSoup<br/>WebBaseLoader"]
+            URL_P["URL Extractor<br/>regex"]
         end
 
-        subgraph Models["ML Models (Lazy-loaded, no LLM)"]
+        subgraph Models["ML Models (Eager-loaded at startup, no LLM)"]
             EMB1["MiniLM-L6-v2<br/>Fast Embeddings"]
-            EMB2["BGE-small-en<br/>Accurate Embeddings"]
+            EMB2["BGE-small-en-v1.5<br/>Accurate Embeddings"]
             RERANK["ms-marco-MiniLM<br/>Cross-Encoder Reranker"]
+        end
+
+        subgraph Core["Core (core/)"]
+            CFG["config.py<br/>Feature flags · Device<br/>Dataclass configs"]
+            ERR["errors.py<br/>MCPServerError hierarchy"]
+            LOG["logging.py<br/>Structured JSON · stderr + file<br/>Request-ID ContextVar"]
+            SCH["schemas.py<br/>ProcessedDocument<br/>ExtractedTable · ExtractedImage<br/>ExtractedURL"]
         end
     end
 
     C1 -- "JSON POST/GET" --> REST
-    C2 -- "MCP Protocol" --> MCP
+    C2 -- "MCP protocol<br/>(streamable-http / stdio)" --> MCP
 
-    REST --> MW
-    MCP --> MW
+    REST --> REST_MW
+    MCP --> GUARD
+    REST_MW --> GUARDS
+    GUARD --> GUARDS
 
-    AUTH --> RL --> VAL --> LOG --> TO
+    GUARDS --> ToolsGroup
 
-    MW --> Services
+    T_Q --> DL
+    T_Q --> CHUNK
+    T_Q --> RET
+    T_E --> DL
+    T_U --> LANG
+    T_U --> CACHE
 
     DL --> CACHE
     DL --> Processors
     CHUNK --> RET
-
     RET --> Models
+    Processors --> LANG
+    Processors --> URL_P
 
     style Clients fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style Transport fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     style MW fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    style ToolsGroup fill:#e0f2f1,stroke:#00695c,stroke-width:2px
+    style Res fill:#f1f8e9,stroke:#558b2f,stroke-width:2px
     style Services fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     style Processors fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
     style Models fill:#fff8e1,stroke:#f9a825,stroke-width:2px
+    style Core fill:#eceff1,stroke:#455a64,stroke-width:2px
 ```
 
 ---
