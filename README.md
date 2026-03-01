@@ -9,40 +9,53 @@ Two access modes:
 - **MCP** — Model Context Protocol for AI agent integration (Claude, Copilot, LangChain, etc.)
 
 ```
-  Any HTTP client                 AI Agent (Claude / Copilot / LangChain)
-  (curl, Postman, frontend)       │  MCP protocol
-       │  REST JSON                ▼
-       ▼                   ┌──────────────────────────────┐
-┌─────────────────────┐    │  MCP Server                  │
-│  REST API (FastAPI)  │    │  (streamable-http · stdio)   │
-│  localhost:8000/api  │    │  localhost:8000/mcp          │
-└────────┬────────────┘    └──────────┬───────────────────┘
-         │                            │
-         └──────────┬─────────────────┘
-                    ▼
-┌──────────────────────────────────────────────────────────┐
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  Middleware (guarded decorator / HTTP middleware)   │  │
-│  │  request-id · auth · rate-limit · timeout · logging│  │
-│  └──────────────────────┬─────────────────────────────┘  │
-│                         ▼                                │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │  13 MCP Tools · 2 MCP Resources                  │    │
-│  │  query (4) · extract (6) · utility (3)           │    │
-│  └──────────────────────┬───────────────────────────┘    │
-│                         ▼                                │
-│  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐   │
-│  │  Services   │ │  Processors  │ │  Core            │   │
-│  │  cache,     │ │  PDF, DOCX,  │ │  config, errors, │   │
-│  │  chunking,  │ │  PPTX, XLSX, │ │  logging, models │   │
-│  │  download,  │ │  CSV, Image, │ │  schemas         │   │
-│  │  retrieval, │ │  HTML, TXT,  │ │                  │   │
-│  │  language   │ │  URL         │ │                  │   │
-│  └─────────────┘ └──────────────┘ └──────────────────┘   │
-│                                                          │
-│  Models: MiniLM · BGE · Cross-Encoder (no LLM)          │
-│  13 MCP Tools · 2 Resources · Eager model load at start  │
-└──────────────────────────────────────────────────────────┘
+                  ┌──────────────────┐           ┌────────────────────────────┐
+                  │  HTTP Client     │           │  AI Agent (Claude, Copilot,│
+                  │  curl · Postman  │           │  LangChain + LLM)          │
+                  └────────┬─────────┘           └─────────────┬──────────────┘
+                           │ REST JSON                         │ MCP protocol
+                           ▼                                   ▼
+  ╔════════════════════════════════════════════════════════════════════════════╗
+  ║                   RAG Document Server (no LLM)                            ║
+  ╠═══════════════════════════════╦════════════════════════════════════════════╣
+  ║  ┌─ REST API ──────────────┐  ║  ┌─ MCP Server ──────────────────────┐   ║
+  ║  │  FastAPI · /api/*       │  ║  │  FastMCP · /mcp                   │   ║
+  ║  │  localhost:8000/api     │  ║  │  streamable-http · stdio          │   ║
+  ║  └────────────┬────────────┘  ║  └──────────────┬────────────────────┘   ║
+  ╠═══════════════╩═══════════════╩═════════════════╩════════════════════════╣
+  ║  MIDDLEWARE ─ request-id · auth · rate-limit · timeout · logging        ║
+  ╠═════════════════════════════════════════════════════════════════════════════╣
+  ║  TOOLS (13)                           RESOURCES (2)                     ║
+  ║  ├─ query.py ──────────────────┐      ├─ rag://supported-formats        ║
+  ║  │  process_document           │      └─ rag://tool-descriptions        ║
+  ║  │  chunk_document             │                                        ║
+  ║  │  retrieve_chunks            │                                        ║
+  ║  │  query_spreadsheet          │                                        ║
+  ║  ├─ extract.py ────────────────┤                                        ║
+  ║  │  pdf · docx · pptx          │                                        ║
+  ║  │  xlsx · csv · image         │                                        ║
+  ║  ├─ utility.py ────────────────┤                                        ║
+  ║  │  detect_language            │                                        ║
+  ║  │  get_system_health          │                                        ║
+  ║  │  manage_cache               │                                        ║
+  ║  └─────────────────────────────┘                                        ║
+  ╠═════════════════════════════════════════════════════════════════════════════╣
+  ║  ┌─ Services ──────────┐  ┌─ Processors ─────────┐  ┌─ Core ──────────┐ ║
+  ║  │  ▸ downloader (3×)  │  │  ▸ PDF   (PyMuPDF)   │  │  ▸ config       │ ║
+  ║  │  ▸ cache (3-layer)  │  │  ▸ DOCX  (python-docx)│  │  ▸ errors      │ ║
+  ║  │  ▸ chunking         │  │  ▸ PPTX  (python-pptx)│  │  ▸ logging     │ ║
+  ║  │  ▸ retrieval (FAISS)│  │  ▸ XLSX/CSV (pandas)  │  │  ▸ models      │ ║
+  ║  │  ▸ language detect  │  │  ▸ Image (pytesseract)│  │  ▸ schemas     │ ║
+  ║  └────────────────────┘  │  ▸ HTML/TXT (BS4)     │  └────────────────┘ ║
+  ║                           │  ▸ URL extractor      │                     ║
+  ║                           └──────────────────────┘                      ║
+  ╠═════════════════════════════════════════════════════════════════════════════╣
+  ║  ML MODELS (eager-loaded at startup · no LLM)                           ║
+  ║  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────┐ ║
+  ║  │  MiniLM-L6-v2   │  │  BGE-small-en    │  │  ms-marco-MiniLM       │ ║
+  ║  │  fast embeddings│  │  accurate embed. │  │  cross-encoder reranker│ ║
+  ║  └─────────────────┘  └──────────────────┘  └─────────────────────────┘ ║
+  ╚═════════════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
@@ -50,104 +63,150 @@ Two access modes:
 ## Architecture Diagram
 
 ```mermaid
-graph TB
-    subgraph Clients["Clients"]
+flowchart TB
+
+    %% ── Clients ──────────────────────────────────────────────────
+    C1(["🌐 HTTP Client<br/>curl · Postman · Frontend"])
+    C2(["🤖 AI Agent + LLM<br/>Claude · Copilot · LangChain"])
+
+    %% ── Transport ────────────────────────────────────────────────
+    subgraph Transport[" 🔌 Transport Layer "]
         direction LR
-        C1["curl / Postman / Frontend"]
-        C2["AI Agent + LLM<br/>(Claude / Copilot / LangChain)"]
+        REST["📡 REST API<br/>FastAPI · /api/*"]
+        MCP["⚡ MCP Protocol<br/>FastMCP · /mcp<br/>streamable-http · stdio"]
     end
 
-    subgraph Server["RAG Document Server v2.0 (no LLM)"]
-        direction TB
+    %% ── Middleware ────────────────────────────────────────────────
+    subgraph MW[" 🛡️ Middleware Pipeline "]
+        direction LR
+        M1["🔑 Auth<br/>x-api-key"]
+        M2["⏱️ Rate Limit<br/>Token bucket"]
+        M3["✅ Validation<br/>URL · text"]
+        M4["📋 Logging<br/>JSON · Request-ID"]
+        M5["⏳ Timeout<br/>30s–300s"]
+    end
 
-        subgraph Transport["Transport Layer (__main__.py)"]
-            REST["REST API<br/>FastAPI · /api/*<br/>(api.py)"]
-            MCP["MCP Protocol<br/>FastMCP · /mcp<br/>(server.py · _asgi.py)"]
+    %% ── Tools ────────────────────────────────────────────────────
+    subgraph ToolsGroup[" 🔧 MCP Tools (13) + Resources (2) "]
+        direction LR
+
+        subgraph TQ[" query.py "]
+            direction TB
+            Q1(["process_document"])
+            Q2(["chunk_document"])
+            Q3(["retrieve_chunks"])
+            Q4(["query_spreadsheet"])
         end
 
-        subgraph MW["Middleware (middleware/)"]
-            REST_MW["REST HTTP Middleware<br/>Request-ID · Auth · Rate Limit"]
-            GUARD["guarded() Decorator<br/>Request-ID · Auth · Rate Limit<br/>Timeout · Structured Logging<br/>Error→dict conversion"]
-            GUARDS["guards.py<br/>check_auth · check_rate_limit<br/>validate_url · validate_text"]
+        subgraph TE[" extract.py "]
+            direction TB
+            E1(["extract_pdf_text"])
+            E2(["extract_docx_text"])
+            E3(["extract_pptx_text"])
+            E4(["extract_xlsx_tables"])
+            E5(["extract_csv_tables"])
+            E6(["extract_image_text"])
         end
 
-        subgraph ToolsGroup["Tools (tools/) — 13 MCP Tools"]
-            direction LR
-            T_Q["query.py (4)<br/>process_document<br/>chunk_document<br/>retrieve_chunks<br/>query_spreadsheet"]
-            T_E["extract.py (6)<br/>extract_pdf_text<br/>extract_docx_text<br/>extract_pptx_text<br/>extract_xlsx_tables<br/>extract_csv_tables<br/>extract_image_text"]
-            T_U["utility.py (3)<br/>detect_language<br/>get_system_health<br/>manage_cache"]
-        end
-
-        subgraph Res["MCP Resources (resources/)"]
-            R1["rag://supported-formats"]
-            R2["rag://tool-descriptions"]
-        end
-
-        subgraph Services["Service Layer (services/)"]
-            DL["Downloader<br/>HTTP · 3× retry"]
-            CACHE["3-Layer TTL Cache<br/>Download · Document<br/>Retriever · 30min TTL"]
-            CHUNK["Adaptive Chunking<br/>Type-aware sizes<br/>Importance scoring"]
-            RET["Enhanced Retrieval<br/>FAISS vector search<br/>Cross-encoder rerank<br/>Diversity filter"]
-            LANG["Language Detection<br/>Multi-round sampling<br/>langdetect"]
-        end
-
-        subgraph Processors["Document Processors (processors/)"]
-            PDF["PDF<br/>PyMuPDF"]
-            DOCX["DOCX<br/>python-docx"]
-            PPTX["PPTX<br/>python-pptx"]
-            XLSX["XLSX/CSV<br/>pandas + openpyxl"]
-            IMG["Image OCR<br/>pytesseract"]
-            HTML_P["HTML/TXT<br/>BeautifulSoup<br/>WebBaseLoader"]
-            URL_P["URL Extractor<br/>regex"]
-        end
-
-        subgraph Models["ML Models (Eager-loaded at startup, no LLM)"]
-            EMB1["MiniLM-L6-v2<br/>Fast Embeddings"]
-            EMB2["BGE-small-en-v1.5<br/>Accurate Embeddings"]
-            RERANK["ms-marco-MiniLM<br/>Cross-Encoder Reranker"]
-        end
-
-        subgraph Core["Core (core/)"]
-            CFG["config.py<br/>Feature flags · Device<br/>Dataclass configs"]
-            ERR["errors.py<br/>MCPServerError hierarchy"]
-            LOG["logging.py<br/>Structured JSON · stderr + file<br/>Request-ID ContextVar"]
-            SCH["schemas.py<br/>ProcessedDocument<br/>ExtractedTable · ExtractedImage<br/>ExtractedURL"]
+        subgraph TU[" utility.py "]
+            direction TB
+            U1(["detect_language"])
+            U2(["get_system_health"])
+            U3(["manage_cache"])
         end
     end
 
-    C1 -- "JSON POST/GET" --> REST
-    C2 -- "MCP protocol<br/>(streamable-http / stdio)" --> MCP
+    %% ── Services ─────────────────────────────────────────────────
+    subgraph Services[" ⚙️ Service Layer "]
+        direction LR
+        DL["📥 Downloader<br/>HTTP · 3× retry"]
+        CACHE["💾 3-Layer Cache<br/>Download · Document<br/>Retriever · 30 min TTL"]
+        CHUNK["✂️ Adaptive Chunking<br/>Type-aware sizes<br/>Importance scoring"]
+        RET["🔍 Retrieval Engine<br/>FAISS vector search<br/>Cross-encoder rerank<br/>Diversity filter"]
+        LANG["🌍 Language Detection<br/>3-round sampling"]
+    end
 
-    REST --> REST_MW
-    MCP --> GUARD
-    REST_MW --> GUARDS
-    GUARD --> GUARDS
+    %% ── Processors ───────────────────────────────────────────────
+    subgraph Processors[" 📄 Document Processors "]
+        direction LR
+        PDF["PDF<br/>PyMuPDF"]
+        DOCX["DOCX<br/>python-docx"]
+        PPTX["PPTX<br/>python-pptx"]
+        XLSX["XLSX · CSV<br/>pandas"]
+        IMG["Image<br/>pytesseract"]
+        HTML["HTML · TXT<br/>BeautifulSoup"]
+        URLP["URL extract<br/>regex"]
+    end
 
-    GUARDS --> ToolsGroup
+    %% ── Models ───────────────────────────────────────────────────
+    subgraph Models[" 🧠 ML Models — eager-loaded · no LLM "]
+        direction LR
+        EMB1["🚀 MiniLM-L6-v2<br/>Fast embeddings"]
+        EMB2["🎯 BGE-small-en-v1.5<br/>Accurate embeddings"]
+        RERANK["📊 ms-marco-MiniLM<br/>Cross-encoder reranker"]
+    end
 
-    T_Q --> DL
-    T_Q --> CHUNK
-    T_Q --> RET
-    T_E --> DL
-    T_U --> LANG
-    T_U --> CACHE
+    %% ── Edges ────────────────────────────────────────────────────
+    C1 -- "JSON" --> REST
+    C2 -- "MCP" --> MCP
+
+    REST --> MW
+    MCP --> MW
+    M1 -.-> M2 -.-> M3 -.-> M4 -.-> M5
+
+    MW --> ToolsGroup
+
+    TQ --> DL & CHUNK & RET
+    TE --> DL
+    TU --> LANG & CACHE
 
     DL --> CACHE
     DL --> Processors
     CHUNK --> RET
     RET --> Models
     Processors --> LANG
-    Processors --> URL_P
+    Processors --> URLP
 
-    style Clients fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style Transport fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-    style MW fill:#fce4ec,stroke:#c62828,stroke-width:2px
-    style ToolsGroup fill:#e0f2f1,stroke:#00695c,stroke-width:2px
-    style Res fill:#f1f8e9,stroke:#558b2f,stroke-width:2px
-    style Services fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style Processors fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    style Models fill:#fff8e1,stroke:#f9a825,stroke-width:2px
-    style Core fill:#eceff1,stroke:#455a64,stroke-width:2px
+    %% ── Styles ───────────────────────────────────────────────────
+    style C1 fill:#bbdefb,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    style C2 fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#01579b
+
+    style Transport fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100
+    style REST fill:#ffe0b2,stroke:#f57c00,stroke-width:1px,color:#e65100
+    style MCP fill:#ffe0b2,stroke:#f57c00,stroke-width:1px,color:#e65100
+
+    style MW fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#b71c1c
+    style M1 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
+    style M2 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
+    style M3 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
+    style M4 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
+    style M5 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
+
+    style ToolsGroup fill:#e0f2f1,stroke:#00695c,stroke-width:2px,color:#004d40
+    style TQ fill:#b2dfdb,stroke:#00897b,stroke-width:1px,color:#004d40
+    style TE fill:#b2dfdb,stroke:#00897b,stroke-width:1px,color:#004d40
+    style TU fill:#b2dfdb,stroke:#00897b,stroke-width:1px,color:#004d40
+
+    style Services fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
+    style DL fill:#c8e6c9,stroke:#43a047,stroke-width:1px,color:#1b5e20
+    style CACHE fill:#c8e6c9,stroke:#43a047,stroke-width:1px,color:#1b5e20
+    style CHUNK fill:#c8e6c9,stroke:#43a047,stroke-width:1px,color:#1b5e20
+    style RET fill:#c8e6c9,stroke:#43a047,stroke-width:1px,color:#1b5e20
+    style LANG fill:#c8e6c9,stroke:#43a047,stroke-width:1px,color:#1b5e20
+
+    style Processors fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c
+    style PDF fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+    style DOCX fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+    style PPTX fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+    style XLSX fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+    style IMG fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+    style HTML fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+    style URLP fill:#e1bee7,stroke:#8e24aa,stroke-width:1px,color:#4a148c
+
+    style Models fill:#fff8e1,stroke:#f9a825,stroke-width:2px,color:#f57f17
+    style EMB1 fill:#fff9c4,stroke:#fbc02d,stroke-width:1px,color:#f57f17
+    style EMB2 fill:#fff9c4,stroke:#fbc02d,stroke-width:1px,color:#f57f17
+    style RERANK fill:#fff9c4,stroke:#fbc02d,stroke-width:1px,color:#f57f17
 ```
 
 ---
