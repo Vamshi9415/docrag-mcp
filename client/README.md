@@ -1,7 +1,7 @@
 # Client — LangChain MCP Agent
 
 A **separate process** that connects to the running RAG Document Server via
-the Model Context Protocol (MCP) and uses its 12 tools through an
+the Model Context Protocol (MCP) and uses its 13 tools through an
 LLM-powered ReAct agent.
 
 > The MCP server itself contains **no LLM** — all reasoning happens here in the client.
@@ -194,7 +194,7 @@ python agent.py "What's the server status?"
 
 ## Available Tools (from MCP Server)
 
-The agent automatically discovers all 12 tools from the MCP server:
+The agent automatically discovers all 13 tools from the MCP server:
 
 ### Document Tools
 
@@ -203,6 +203,7 @@ The agent automatically discovers all 12 tools from the MCP server:
 | `process_document` | Extract text, tables, images, URLs from any document | You need the full content of a document |
 | `chunk_document` | Split document into scored, RAG-ready chunks | You need to see how a document is segmented |
 | `retrieve_chunks` | FAISS vector search + reranking for relevant chunks | You need to answer a specific question about a document |
+| `query_spreadsheet` | Pandas row lookup in XLSX/CSV files | You need specific row data from a spreadsheet (e.g. "phone number of John") |
 
 ### Extraction Tools
 
@@ -318,6 +319,22 @@ The document is written in French (language code: fr).
 Summary: The report discusses...
 ```
 
+### Spreadsheet Row Lookup
+
+```
+> What is the phone number of Vamshi Bachu?
+  https://example.com/contacts.xlsx
+
+Agent thinking: This is an XLSX file and the user wants a specific row.
+I'll use query_spreadsheet for an exact lookup.
+
+[Tool call: query_spreadsheet(document_url="https://example.com/contacts.xlsx",
+                              search_value="vamshi bachu")]
+
+Found:
+  • Name: Vamshi Bachu, Phone: 8309245040, Email: vamshi@example.com
+```
+
 ---
 
 ## Architecture Details
@@ -336,12 +353,11 @@ Summary: The report discusses...
 1. agent.py starts
 2. Loads .env (python-dotenv)
 3. Selects LLM based on available API keys
-4. Connects to MCP server via MultiServerMCPClient
-5. Server returns list of available tools (MCP protocol)
+4. Creates MultiServerMCPClient (no context manager)
+5. Calls await client.get_tools() to discover tools
 6. langchain-mcp-adapters wraps each as a LangChain tool
-7. create_react_agent(llm, tools) builds the agent
+7. create_react_agent(llm, tools, prompt=SYSTEM_PROMPT) builds the agent
 8. Agent enters REPL loop or processes one-shot query
-9. On exit: MCP connection is closed cleanly (async context manager)
 ```
 
 ### Key Code Paths
@@ -353,16 +369,16 @@ if os.getenv("GOOGLE_API_KEY"):
 elif os.getenv("OPENAI_API_KEY"):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-# MCP connection
-async with MultiServerMCPClient({"rag-server": {
+# MCP connection (no context manager — v0.1.0+ API)
+client = MultiServerMCPClient({"rag-server": {
     "url": MCP_SERVER_URL,
     "transport": "streamable_http",
-}}) as client:
-    tools = client.get_tools()
-    agent = create_react_agent(llm, tools)
+}})
+tools = await client.get_tools()
+agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
-    # Process query
-    result = await agent.ainvoke({"messages": [("user", query)]})
+# Process query
+result = await agent.ainvoke({"messages": [{"role": "user", "content": query}]})
 ```
 
 ### Dependencies

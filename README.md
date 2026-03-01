@@ -1,4 +1,4 @@
-# RAG Document Server v2.0
+# RAG Document Server v2.1
 
 **Pure deterministic tool server** for document processing, chunking, and
 vector retrieval. **No LLM inside** — bring your own agent.
@@ -30,6 +30,7 @@ Two access modes:
 │  └────────────┘  └──────────────┘  └─────────────┘  │
 │                                                      │
 │  Models: MiniLM · BGE · Cross-Encoder (no LLM)      │
+│  13 MCP Tools · Eager model loading at startup       │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -124,7 +125,7 @@ graph TB
 9.  [Document Processors — Internals](#document-processors--internals)
 10. [Adaptive Chunking Algorithm](#adaptive-chunking-algorithm)
 11. [Retrieval Engine](#retrieval-engine)
-12. [Lazy Model Loading](#lazy-model-loading)
+12. [Eager Model Loading](#eager-model-loading)
 13. [Structured Logging](#structured-logging)
 14. [Error Hierarchy](#error-hierarchy)
 15. [Data Schemas](#data-schemas)
@@ -171,6 +172,9 @@ python -m mcp_server --transport rest --host 0.0.0.0 --port 9000
 # ── MCP transport (for AI agent integration) ──────────────────────
 python -m mcp_server                                     # streamable-http, localhost:8000
 python -m mcp_server --transport stdio                   # stdio (piped)
+
+# ── Development mode (auto-reload on code changes) ────────────────
+python -m mcp_server --reload                            # watches mcp_server/ for changes
 ```
 
 | CLI Argument    | Choices                                 | Default              |
@@ -178,6 +182,7 @@ python -m mcp_server --transport stdio                   # stdio (piped)
 | `--transport`   | `streamable-http`, `stdio`, `rest`      | `streamable-http`    |
 | `--host`        | Any bind address                        | `127.0.0.1`          |
 | `--port`        | Any port number                         | `8000`               |
+| `--reload`      | Flag (no value)                         | Off                  |
 
 ### 4. Verify
 
@@ -248,6 +253,7 @@ are available at `http://127.0.0.1:8000/docs`.
 | `POST` | `/api/process-document` | `{"document_url": "..."}` | Extract text, tables, images, URLs from any document |
 | `POST` | `/api/chunk-document` | `{"document_url": "..."}` | Split document into scored, RAG-ready chunks |
 | `POST` | `/api/retrieve-chunks` | `{"document_url": "...", "query": "...", "top_k": 5}` | Vector search (FAISS + reranking) for relevant chunks |
+| `POST` | `/api/query-spreadsheet` | `{"document_url": "...", "search_value": "..."}` | Pandas row lookup in XLSX/CSV files |
 
 ### Extraction Endpoints
 
@@ -365,10 +371,11 @@ On error (tools never raise — all exceptions are caught):
 | 1 | `process_document` | `document_url: str` | `{content (≤50K chars), content_length, metadata, tables[], images[], urls[], detected_language, detected_language_name}` | 300 s |
 | 2 | `chunk_document` | `document_url: str` | `{chunks[{text (≤5K), chunk_index, total_chunks, importance_score, content_type}], chunk_count, document_type}` | 300 s |
 | 3 | `retrieve_chunks` | `document_url: str, query: str, top_k: int (1–20, default 5)` | `{results[{text, chunk_index, importance_score, content_type}], total_chunks_indexed}` | 300 s |
+| 4 | `query_spreadsheet` | `document_url: str, search_value: str` | `{matches[{row data}], match_count, sheets_searched}` | 300 s |
 
 **`retrieve_chunks` internal pipeline:**
 1. Downloads document → processes it → chunks it adaptively
-2. Selects embedding model (accurate if <100 chunks, fast otherwise)
+2. Selects embedding model (fast if ≤50 chunks, accurate otherwise — cross-encoder reranking compensates)
 3. Builds a FAISS vector index from all chunks
 4. Runs similarity search with 3× over-retrieval (up to 20 candidates)
 5. Reranks with cross-encoder (if available)
@@ -376,31 +383,38 @@ On error (tools never raise — all exceptions are caught):
 7. Returns `top_k` best chunks
 8. Caches both the processed document and the FAISS retriever (keyed by `sha256(url)[:16]`)
 
+**`query_spreadsheet` — pandas row lookup:**
+1. Downloads XLSX/CSV file
+2. Loads all sheets into pandas DataFrames
+3. Performs case-insensitive substring match across ALL columns
+4. Returns matching rows as dictionaries with sheet names
+5. Use for specific row lookups (e.g. "find phone number of John")
+
 ### Extraction Tools
 
 | # | Tool | Input | Output | Timeout |
 |---|------|-------|--------|---------|
-| 4 | `extract_pdf_text` | `document_url: str` | `{text (≤50K chars), char_count}` | 120 s |
-| 5 | `extract_docx_text` | `document_url: str` | `{text (≤50K chars), char_count}` | 120 s |
-| 6 | `extract_pptx_text` | `document_url: str` | `{text (≤50K chars), char_count}` | 120 s |
-| 7 | `extract_xlsx_tables` | `document_url: str` | `{tables[{content (≤5K), table_type, location, metadata}], table_count}` | 120 s |
-| 8 | `extract_csv_tables` | `document_url: str` | `{tables[{content (≤5K), table_type, location, metadata}], table_count}` | 120 s |
-| 9 | `extract_image_text` | `image_url: str` | `{ocr_results[{text, confidence, metadata}]}` | 120 s |
+| 5 | `extract_pdf_text` | `document_url: str` | `{text (≤50K chars), char_count}` | 120 s |
+| 6 | `extract_docx_text` | `document_url: str` | `{text (≤50K chars), char_count}` | 120 s |
+| 7 | `extract_pptx_text` | `document_url: str` | `{text (≤50K chars), char_count}` | 120 s |
+| 8 | `extract_xlsx_tables` | `document_url: str` | `{tables[{content (≤5K), table_type, location, metadata}], table_count}` | 120 s |
+| 9 | `extract_csv_tables` | `document_url: str` | `{tables[{content (≤5K), table_type, location, metadata}], table_count}` | 120 s |
+| 10 | `extract_image_text` | `image_url: str` | `{ocr_results[{text, confidence, metadata}]}` | 120 s |
 
 ### Utility Tools
 
 | # | Tool | Input | Output | Timeout |
 |---|------|-------|--------|---------|
-| 10 | `detect_language` | `text: str` | `{language_code, language_name}` | 30 s |
-| 11 | `get_system_health` | (none) | Full health report: status, version, features, security, models, formats, device, cache stats, timestamp | 30 s |
-| 12 | `manage_cache` | `action: str ("stats" / "clear")` | Cache statistics per layer or eviction counts | 30 s |
+| 11 | `detect_language` | `text: str` | `{language_code, language_name}` | 30 s |
+| 12 | `get_system_health` | (none) | Full health report: status, version, features, security, models, formats, device, cache stats, timestamp | 30 s |
+| 13 | `manage_cache` | `action: str ("stats" / "clear")` | Cache statistics per layer or eviction counts | 30 s |
 
 ### MCP Resources
 
 | URI | Description |
 |-----|-------------|
 | `rag://supported-formats` | Human-readable list of all supported document formats |
-| `rag://tool-descriptions` | Summary of all 12 tools and their parameters |
+| `rag://tool-descriptions` | Summary of all 13 tools and their parameters |
 
 ---
 
@@ -415,16 +429,17 @@ On error (tools never raise — all exceptions are caught):
 │
 ├── mcp_server/                  # ─── Server package ───
 │   ├── __init__.py
-│   ├── __main__.py              # CLI: --transport rest|streamable-http|stdio
+│   ├── __main__.py              # CLI: --transport rest|streamable-http|stdio --reload
 │   ├── server.py                # FastMCP instance, lifespan, tool registration
 │   ├── api.py                   # FastAPI REST wrapper (plain JSON endpoints)
+│   ├── _asgi.py                 # ASGI factory for --reload mode (uvicorn)
 │   │
 │   ├── core/
 │   │   ├── config.py            # Frozen dataclass configs, feature flags, device detection
 │   │   ├── logging.py           # Structured JSON logging to stderr, request-id ContextVar
 │   │   ├── errors.py            # Exception hierarchy (6 error types)
 │   │   ├── schemas.py           # ProcessedDocument, ExtractedTable, ExtractedImage, ExtractedURL
-│   │   └── models.py            # Lazy-loaded ML models (embeddings + reranker only)
+│   │   └── models.py            # Eager-loaded ML models (embeddings + reranker only)
 │   │
 │   ├── middleware/
 │   │   ├── __init__.py          # @guarded() decorator — full middleware chain
@@ -447,7 +462,7 @@ On error (tools never raise — all exceptions are caught):
 │   │   └── url.py               # Regex URL extraction with context + categorisation
 │   │
 │   ├── tools/
-│   │   ├── query.py             # process_document, chunk_document, retrieve_chunks
+│   │   ├── query.py             # process_document, chunk_document, retrieve_chunks, query_spreadsheet
 │   │   ├── extract.py           # Per-format extraction (PDF, DOCX, PPTX, XLSX, CSV, Image)
 │   │   └── utility.py           # detect_language, get_system_health, manage_cache
 │   │
@@ -505,7 +520,7 @@ Runs once at import time:
 | Field | Type | Default |
 |-------|------|---------|
 | `name` | `str` | `"RAG Document Server"` |
-| `version` | `str` | `"2.0.0"` |
+| `version` | `str` | `"2.1.0"` |
 | `host` | `str` | `"127.0.0.1"` |
 | `port` | `int` | `8000` |
 | `transport` | `str` | `"streamable-http"` |
@@ -785,8 +800,8 @@ Chunks → Embedding → FAISS Index → Similarity Search (3× over-retrieval)
    in the retriever cache layer for subsequent queries).
 
 2. **Embedding Model Selection:**
-   - < 100 chunks → `get_embeddings_accurate()` (BGE-small-en-v1.5)
-   - ≥ 100 chunks → `get_embeddings_fast()` (MiniLM-L6-v2) for performance
+   - ≤ 50 chunks → `get_embeddings_fast()` (MiniLM-L6-v2) — cross-encoder reranking compensates
+   - > 50 chunks → `get_embeddings_accurate()` (BGE-small-en-v1.5)
 
 3. **Similarity Search** — `vectorstore.similarity_search(query, k=min(top_k * 3, 20))`.
    Fetches 3× the requested number of candidates (capped at 20).
@@ -805,10 +820,12 @@ Chunks → Embedding → FAISS Index → Similarity Search (3× over-retrieval)
 
 ---
 
-## Lazy Model Loading
+## Eager Model Loading
 
-All ML models (embeddings + reranker) are loaded **on first access**, not at
-import time. This keeps server boot time under 2 seconds.
+All ML models (embeddings + reranker) are loaded **eagerly at server startup**
+via `_ensure_models_loaded()` called during the FastMCP lifespan (or in the
+`_asgi.py` factory for `--reload` mode). Each model logs its name with a ✓
+checkmark when loaded.
 
 ### Thread-Safe Double-Checked Locking
 
@@ -838,7 +855,8 @@ once even under concurrent requests.
 ## Structured Logging
 
 All logs are structured JSON emitted to **stderr** (keeping stdout free for
-MCP stdio transport).
+MCP stdio transport). Additionally, logs are written to daily rotating files
+in `request_logs/server_YYYY-MM-DD.log`.
 
 ### Log Format
 
@@ -1071,6 +1089,9 @@ python -m mcp_server 2>&1
 
 # MCP server (stdio — for piped agent connections)
 python -m mcp_server --transport stdio
+
+# Development mode (auto-reload on code changes)
+python -m mcp_server --reload
 
 # Smoke test
 curl http://127.0.0.1:8000/api/health

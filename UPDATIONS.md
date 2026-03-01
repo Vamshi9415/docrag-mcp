@@ -299,25 +299,26 @@ The restructure keeps **every user-facing capability identical** but rebuilds th
 
 ---
 
-## Summary of Current State (v2.0)
+## Summary of Current State (v2.1)
 
 | Metric | Value |
 |--------|-------|
-| Version | **2.0.0** |
-| Total `.py` files | **31** |
-| Total lines of code | **2,286** |
+| Version | **2.1.0** |
+| Total `.py` files | **32** |
+| Total lines of code | **~2,500** |
 | Architecture layers | **6** (core, middleware, services, processors, tools, resources) |
-| MCP tools | **11** |
+| MCP tools | **13** |
 | MCP resources | **2** |
 | Transport | Streamable HTTP (default), stdio (fallback) |
 | Endpoint | `http://127.0.0.1:8000/mcp` |
 | Security | Auth + rate-limit (60 RPM) + URL/text/questions validation + per-tool timeouts |
 | Error handling | 7-class typed hierarchy, never raises |
-| Logging | Structured JSON with request-id correlation |
-| Caching | 3-layer TTL (download → document → retriever) |
-| Model loading | Lazy (on first tool call, not at startup) |
+| Logging | Structured JSON to stderr + daily file logs (`request_logs/server_YYYY-MM-DD.log`) |
+| Caching | 3-layer TTL (download → document → retriever); doc/retriever caches preserved on shutdown |
+| Model loading | **Eager** (loaded at startup, not on first call) |
 | Retry logic | 3× with exponential back-off on downloads |
-| Graceful shutdown | Lifespan-managed cache flush |
+| Graceful shutdown | Only download cache cleared; doc/retriever caches kept alive |
+| Dev mode | `--reload` flag with auto-reload (excludes `__pycache__`, `*.pyc`, `request_logs`, `temp_files`) |
 | Config | 4 frozen dataclasses, 20 fields, 5 env vars |
 | Entry point | `python -m mcp_server` |
 | Supported formats | PDF, DOCX, PPTX, XLSX, CSV, TXT, HTML, images (OCR) |
@@ -331,6 +332,62 @@ The restructure keeps **every user-facing capability identical** but rebuilds th
 | P2 | No streaming answers | Not fixed |
 | P2 | FAISS in-memory only (lost on restart) | Partially mitigated by cache |
 | P2 | Unbounded temp files | Not fixed |
-| P2 | No input validation on URLs (SSRF risk) | Not fixed |
-| P3 | No request timeout | Not fixed |
-| P3 | Hardcoded chunk sizes | Not fixed |
+
+---
+
+## 11. Session Enhancements (v2.1)
+
+**What:** A series of incremental improvements to both server and client covering reliability, developer experience, performance, and RAG quality.
+
+### 11a. File-Based Request Logging
+
+**What:** Added a `FileHandler` that writes structured JSON logs to `request_logs/server_YYYY-MM-DD.log` (daily rotation). Every RAG pipeline step (download, extract, chunk, embed, rerank, filter) is individually logged with timing.
+
+**Why:** Stderr-only logging is lost when the terminal scrolls or the process restarts. File logs are persistent, searchable, and enable post-hoc debugging of pipeline issues.
+
+**Also fixed:** Renamed logging extras from Python-reserved names (`args` → `tool_args`, `message` → `detail`) to prevent `KeyError` in `LogRecord`.
+
+### 11b. Eager Model Loading at Startup
+
+**What:** Changed from lazy (on first request) to **eager** model loading during FastMCP lifespan startup. Each model logs its name with a ✓ checkmark and device info. In `--reload` mode, loading happens in the `_asgi.py` factory since `streamable_http_app()` doesn't trigger lifespan.
+
+**Why:** Lazy loading caused a 15-20s delay on the first user query, which was confusing. Eager loading moves that cost to startup where it's expected.
+
+### 11c. Auto-Reload Dev Mode (`--reload`)
+
+**What:** Added `--reload` CLI flag that runs uvicorn with `--reload` using `_asgi.py` as an ASGI factory. Watches `mcp_server/` for changes and auto-restarts. Added `reload_excludes` for `__pycache__`, `*.pyc`, `request_logs`, `temp_files` to prevent infinite reload loops.
+
+**Why:** During development, manually restarting the server after every code change is slow and error-prone. `--reload` gives instant feedback.
+
+### 11d. `query_spreadsheet` Tool (Tool #13)
+
+**What:** Added a new MCP tool `query_spreadsheet(document_url, search_value)` that:
+1. Downloads XLSX/CSV files
+2. Loads all sheets into pandas DataFrames
+3. Performs case-insensitive substring match across ALL columns
+4. Returns matching rows as dictionaries with sheet names
+
+**Why:** The vector-based `retrieve_chunks` tool returns DATA ANALYSIS summaries (column stats, types), not actual row data. When a user asks "what is the phone number of Vamshi?", they need an exact row lookup — not a semantic summary. `query_spreadsheet` fills this gap.
+
+### 11e. Embedding Model Optimisation
+
+**What:** Changed threshold from "accurate for <100 chunks" to **"fast (MiniLM) for ≤50 chunks"**. The cross-encoder reranker compensates for any quality difference in the initial embedding.
+
+**Why:** BGE model was 2-3× slower than MiniLM for small documents where the quality difference is negligible (reranking corrects the ordering anyway).
+
+### 11f. Cache Preservation on Shutdown
+
+**What:** Changed shutdown behaviour: only the download cache is cleared on server stop. Document and retriever caches are kept alive (they'll expire naturally via TTL).
+
+**Why:** Previously all three caches were flushed on shutdown, losing expensive FAISS indexes. Keeping them means faster responses if the server restarts within the TTL window.
+
+### 11g. Client Improvements
+
+| Change | Detail |
+|--------|--------|
+| LLM upgrade | `gemini-2.5-flash-lite` → `gemini-2.5-flash` for better instruction following |
+| Connection API | Removed `async with` context manager (deprecated in langchain-mcp-adapters v0.1.0+) |
+| System prompt | Rewrote with RULE #1 MANDATORY forcing tool calls for ALL doc types; `retrieve_chunks` as default |
+| Response extraction | Added `_extract_ai_answer()` handling string and list content from Gemini |
+| Fallback | Added `_fallback_from_tool_result()` — formats tool output directly when LLM returns empty |
+| Null byte sanitization | Added `_sanitize_text()` across all processors and tools to strip `\x00` characters |
