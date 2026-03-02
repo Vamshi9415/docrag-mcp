@@ -68,16 +68,16 @@ def main() -> None:
             )
         else:
             from mcp_server.server import create_server
-            from mcp_server.middleware.guards import AuthMiddleware
+            from mcp_server.middleware.guards import AuthMiddleware, MCPRouter
 
             mcp = create_server(host=args.host, port=args.port)
 
             if args.transport == "streamable-http":
-                # Build the ASGI app and wrap it with auth middleware so that
-                # every HTTP request to /mcp must carry a valid x-api-key header.
+                # Build the ASGI app, add GET routes, then wrap with auth.
+                # Stack: AuthMiddleware -> MCPRouter -> FastMCP
                 import uvicorn
 
-                asgi_app = AuthMiddleware(mcp.streamable_http_app())
+                asgi_app = AuthMiddleware(MCPRouter(mcp.streamable_http_app()))
                 print(f"\n  RAG Document Server \u2014 MCP (streamable-http)")
                 print(f"  Listening on  http://{args.host}:{args.port}")
                 print(f"  MCP endpoint: http://{args.host}:{args.port}/mcp")

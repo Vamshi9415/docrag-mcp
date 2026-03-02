@@ -112,14 +112,21 @@ def validate_text(text: str, field_name: str = "text") -> None:
 # ASGI Middleware — HTTP-level auth for MCP streamable-http transport
 # ═══════════════════════════════════════════════════════════════════
 
+# Paths that bypass authentication — reachable by infra probes without a key
+_AUTH_EXEMPT_PATHS: frozenset[str] = frozenset({"/health"})
+
+
 class AuthMiddleware:
     """ASGI middleware that enforces ``x-api-key`` authentication on the
     MCP streamable-http transport.
 
-    Wrapped around ``mcp.streamable_http_app()`` so that every HTTP request
-    — tool calls, SSE streams, and preflight pings — must carry a valid
-    ``x-api-key`` header when ``MCP_API_KEY`` is configured in the
-    environment.  Auth is skipped when ``MCP_API_KEY`` is not set.
+    Wrapped around ``MCPRouter(mcp.streamable_http_app())`` so that every
+    HTTP request — tool calls, SSE streams, and preflight pings — must
+    carry a valid ``x-api-key`` header when ``MCP_API_KEY`` is configured.
+    Auth is skipped when ``MCP_API_KEY`` is not set.
+
+    ``GET /health`` is always exempt so load-balancers and k8s liveness
+    probes can reach it without credentials.
     """
 
     def __init__(self, app) -> None:
@@ -127,25 +134,134 @@ class AuthMiddleware:
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "http" and security_config.auth_enabled:
-            headers = dict(scope.get("headers", []))
-            provided_key = headers.get(b"x-api-key", b"").decode()
-            if provided_key != security_config.api_key:
-                logger.warning(
-                    "auth.rejected",
-                    extra={"detail": "invalid or missing x-api-key on MCP transport"},
-                )
-                # Return a plain HTTP 401 without invoking the MCP app
-                body = b'{"error": "Invalid or missing API key", "code": "AUTH_ERROR"}'
-                await send({
-                    "type": "http.response.start",
-                    "status": 401,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode()),
-                    ],
-                })
-                await send({"type": "http.response.body", "body": body})
-                return
+            path = scope.get("path", "")
+            if path not in _AUTH_EXEMPT_PATHS:
+                headers = dict(scope.get("headers", []))
+                provided_key = headers.get(b"x-api-key", b"").decode()
+                if provided_key != security_config.api_key:
+                    logger.warning(
+                        "auth.rejected",
+                        extra={"detail": "invalid or missing x-api-key on MCP transport"},
+                    )
+                    body = b'{"error": "Invalid or missing API key", "code": "AUTH_ERROR"}'
+                    await send({
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                        ],
+                    })
+                    await send({"type": "http.response.body", "body": body})
+                    return
         await self.app(scope, receive, send)
+
+
+class MCPRouter:
+    """Lightweight ASGI router that adds standard GET endpoints to the MCP
+    streamable-http transport, then forwards everything else to FastMCP.
+
+    Routes handled here (must sit *inside* AuthMiddleware):
+
+        GET /health   — liveness probe, NO auth required (whitelisted above)
+                        Returns: {status, transport, auth_enabled, models_loaded}
+
+        GET /info     — server capabilities, auth required
+                        Returns: {server, version, mcp_endpoint, auth, features,
+                                  supported_formats, device}
+
+    All other paths/methods → FastMCP ``streamable_http_app()``.
+
+    Deployment stack (outer → inner)::
+
+        AuthMiddleware
+            └─ MCPRouter
+                ├─ GET /health    (probe — no auth)
+                ├─ GET /info      (capabilities — auth)
+                └─ *              FastMCP (/mcp POST + SSE)
+    """
+
+    def __init__(self, mcp_app) -> None:
+        self.mcp_app = mcp_app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            method = scope.get("method", "").upper()
+
+            if path == "/health" and method == "GET":
+                await self._health(send)
+                return
+            if path == "/info" and method == "GET":
+                await self._info(send)
+                return
+
+        await self.mcp_app(scope, receive, send)
+
+    @staticmethod
+    async def _health(send) -> None:
+        """GET /health — liveness/readiness probe (no auth)."""
+        import json
+        from mcp_server.core.models import models_loaded
+
+        body = json.dumps({
+            "status": "healthy",
+            "transport": "streamable-http",
+            "mcp_endpoint": "/mcp",
+            "auth_enabled": security_config.auth_enabled,
+            "models_loaded": models_loaded(),
+        }, indent=2).encode()
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    async def _info(send) -> None:
+        """GET /info — server capabilities (auth required)."""
+        import json
+        from mcp_server.core.config import (
+            RERANK_AVAILABLE, OCR_AVAILABLE, LANG_DETECT_AVAILABLE,
+            DEVICE, server_config,
+        )
+
+        body = json.dumps({
+            "server": server_config.name,
+            "version": server_config.version,
+            "transport": "streamable-http",
+            "mcp_endpoint": "/mcp",
+            "auth": {
+                "enabled": security_config.auth_enabled,
+                "header": "x-api-key",
+            },
+            "features": {
+                "adaptive_chunking": True,
+                "vector_retrieval": True,
+                "reranking": RERANK_AVAILABLE,
+                "ocr": OCR_AVAILABLE,
+                "language_detection": LANG_DETECT_AVAILABLE,
+            },
+            "supported_formats": [
+                "pdf", "docx", "pptx", "xlsx", "csv",
+                "txt", "html", "png", "jpeg",
+            ],
+            "device": DEVICE,
+        }, indent=2).encode()
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 

@@ -25,5 +25,5 @@ def create_app():
     _ensure_models_loaded()
     logger.info("server.models.ready — all models loaded and ready")
 
-    from mcp_server.middleware.guards import AuthMiddleware
-    return AuthMiddleware(mcp.streamable_http_app())
+    from mcp_server.middleware.guards import AuthMiddleware, MCPRouter
+    return AuthMiddleware(MCPRouter(mcp.streamable_http_app()))
