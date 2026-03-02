@@ -40,6 +40,7 @@ MCP_SERVER_URL = os.getenv(
     "MCP_SERVER_URL",
     "http://127.0.0.1:8000/mcp"
 )
+MCP_API_KEY = os.getenv("MCP_API_KEY", "")
 
 SYSTEM_PROMPT = """You are a document analysis assistant. You MUST use tools to answer questions.
 
@@ -77,11 +78,15 @@ async def initialize_agent():
 
     llm = get_llm()
 
+    # Build headers — include x-api-key when the server has auth enabled.
+    connection_headers = {"x-api-key": MCP_API_KEY} if MCP_API_KEY else {}
+
     client = MultiServerMCPClient(
         {
             "rag-server": {
                 "url": MCP_SERVER_URL,
                 "transport": "streamable_http",
+                "headers": connection_headers,
             }
         }
     )
