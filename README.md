@@ -251,11 +251,14 @@ pip install -r requirements.txt
 
 ### 2. Set environment variables
 
+The server uses `.env` for configuration. The only **required** setting is
+`MCP_API_KEY` which authenticates every MCP and REST request:
+
 ```bash
-# Optional security
-export MCP_API_KEY="your-secret-key"         # enables auth
-export MCP_RATE_LIMIT_RPM="60"               # requests per minute
-export MCP_REQUEST_TIMEOUT="300"             # seconds per tool call
+# .env (copy from .env.example and customise)
+MCP_API_KEY=vamshibachumcpserver      # authenticate all requests
+# MCP_RATE_LIMIT_RPM=60               # requests per minute (default: 60)
+# MCP_REQUEST_TIMEOUT=300             # seconds per tool call (default: 300)
 ```
 
 > **Note:** No `GOOGLE_API_KEY` is needed for the server — it contains no LLM.
@@ -422,16 +425,35 @@ curl -X POST http://127.0.0.1:8000/api/retrieve-chunks \
 
 ### Authentication (REST)
 
-If `MCP_API_KEY` is set, every request must include the key:
+`MCP_API_KEY` is set, so every REST request must include the `x-api-key` header:
 
 ```powershell
 Invoke-RestMethod -Uri http://127.0.0.1:8000/api/health `
-  -Headers @{ "x-api-key" = "your-secret-key" }
+  -Headers @{ "x-api-key" = "vamshibachumcpserver" }
 ```
 
 ```bash
-curl http://127.0.0.1:8000/api/health -H "x-api-key: your-secret-key"
+curl http://127.0.0.1:8000/api/health -H "x-api-key: vamshibachumcpserver"
 ```
+
+### Authentication (MCP / streamable-http)
+
+The same key is enforced at the ASGI level on the `/mcp` endpoint.
+MCP clients must send the header on every connection:
+
+```python
+# langchain-mcp-adapters
+MultiServerMCPClient({
+    "rag-server": {
+        "url": "http://127.0.0.1:8000/mcp",
+        "transport": "streamable_http",
+        "headers": {"x-api-key": "vamshibachumcpserver"},
+    }
+})
+```
+
+The client agent (`client/agent.py`) reads `MCP_API_KEY` from its `.env` and
+passes it automatically — no manual setup needed if you use the bundled client.
 
 ### Response Envelope
 
@@ -646,8 +668,8 @@ Runs once at import time:
 
 | Field | Type | Default | Env Var |
 |-------|------|---------|---------|
-| `api_key` | `str` | `""` | `MCP_API_KEY` |
-| `auth_enabled` | `bool` | `bool(os.getenv("MCP_API_KEY"))` | `MCP_API_KEY` |
+| `api_key` | `str` | `"vamshibachumcpserver"` | `MCP_API_KEY` |
+| `auth_enabled` | `bool` | `True` when `MCP_API_KEY` is set | `MCP_API_KEY` |
 | `rate_limit_rpm` | `int` | `60` | `MCP_RATE_LIMIT_RPM` |
 | `max_url_length` | `int` | `2048` | — |
 | `max_text_length` | `int` | `100,000` | — |
@@ -670,8 +692,15 @@ Request → [1] Request ID → [2] Auth → [3] Rate Limit → [4] Execute w/ Ti
 1. **Request ID Generation** — `uuid4().hex[:12]` stored in a `ContextVar` for log
    correlation across the entire call stack.
 
-2. **Authentication** (`check_auth()`) — if `SecurityConfig.auth_enabled` is `True`,
-   verifies the API key. Raises `AuthenticationError` on failure.
+2. **Authentication** — enforced at **two layers**:
+   - **MCP transport (streamable-http):** `AuthMiddleware` (ASGI) intercepts every
+     HTTP request to `/mcp` and returns HTTP 401 if the `x-api-key` header is
+     missing or incorrect. This runs before FastMCP even sees the request.
+   - **REST API:** `guard_middleware` (FastAPI) checks the same header on every
+     `/api/*` request.
+   - **MCP tools (`check_auth()`):** secondary guard called inside `@guarded()`
+     for defence-in-depth; raises `AuthenticationError` if auth is enabled but
+     the key is empty.
 
 3. **Rate Limiting** (`check_rate_limit(tool_name)`) — token-bucket algorithm:
    - Capacity = `rate_limit_rpm` (default 60)
@@ -1078,11 +1107,11 @@ Gujarati, Punjabi, Urdu, Chinese, Japanese (18 languages).
 
 ## Environment Variables
 
-### Server Variables
+### Server Variables (set in `.env` at project root)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MCP_API_KEY` | No | — | Enables authentication when set |
+| `MCP_API_KEY` | **Yes** | `vamshibachumcpserver` | Authenticates all MCP and REST requests via `x-api-key` header |
 | `MCP_RATE_LIMIT_RPM` | No | `60` | Global rate limit (requests/minute) |
 | `MCP_REQUEST_TIMEOUT` | No | `300` | Default tool timeout in seconds |
 | `HUGGINGFACE_TOKEN` | No | — | HuggingFace model access (for gated models) |
@@ -1097,7 +1126,7 @@ Gujarati, Punjabi, Urdu, Chinese, Japanese (18 languages).
 | `GOOGLE_API_KEY` | Yes (one of) | — | Gemini LLM (default) |
 | `OPENAI_API_KEY` | Yes (one of) | — | OpenAI fallback |
 | `MCP_SERVER_URL` | No | `http://127.0.0.1:8000/mcp` | MCP server endpoint |
-| `MCP_API_KEY` | No | — | Must match server's key if auth enabled |
+| `MCP_API_KEY` | **Yes** | `vamshibachumcpserver` | Must match server's `MCP_API_KEY` |
 
 ### Optional Tracing Variables
 
