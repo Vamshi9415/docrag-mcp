@@ -1,7 +1,8 @@
 # MCP Server — API Tests
 
-This folder contains test scripts that verify the server's API key authentication
-(`x-api-key`) is correctly enforced on the MCP `streamable-http` transport.
+This folder contains test scripts that verify:
+1. API key authentication (`x-api-key`) is correctly enforced on the MCP `streamable-http` transport
+2. The standard GET endpoints (`/health`, `/info`) behave correctly
 
 ---
 
@@ -9,7 +10,7 @@ This folder contains test scripts that verify the server's API key authenticatio
 
 | File | Description |
 |------|-------------|
-| `test_mcp_auth.ps1` | PowerShell script — 5 auth tests against the `/mcp` endpoint |
+| `test_mcp_auth.ps1` | PowerShell script — 8 tests covering auth on `/mcp` and the GET `/health`/`/info` endpoints |
 
 ---
 
@@ -79,13 +80,23 @@ Open a **second** terminal in the project root and run:
 
 ## What the Tests Verify
 
+### POST /mcp — MCP protocol endpoint
+
 | # | Test | Sent Header | Expected Status | What it proves |
 |---|------|-------------|-----------------|----------------|
 | 1 | No API key | *(none)* | **401** | Requests without any key are blocked |
 | 2 | Empty key value | `x-api-key: ` | **401** | Empty string is treated as missing |
 | 3 | Wrong API key | `x-api-key: wrongkey-...` | **401** | Invalid keys are rejected |
 | 4 | Correct API key | `x-api-key: vamshibachumcpserver` | **200** | Valid key passes; full MCP handshake completes |
-| 5 | Correct key, GET method | `x-api-key: vamshibachumcpserver` | **not 401** | Auth passes; FastMCP closes the connection for unsupported methods — proves middleware order |
+| 5 | Correct key, GET method | `x-api-key: vamshibachumcpserver` | **not 401** | Auth passes; FastMCP rejects wrong method — proves middleware order |
+
+### Standard GET endpoints
+
+| # | Endpoint | Sent Header | Expected Status | What it proves |
+|---|----------|-------------|-----------------|----------------|
+| 6 | `GET /health` | *(none)* | **200** | Liveness probe is exempt from auth — always reachable by infra |
+| 7 | `GET /info` | *(none)* | **401** | Capabilities endpoint requires auth |
+| 8 | `GET /info` | `x-api-key: vamshibachumcpserver` | **200** | Valid key returns server version, features, supported formats |
 
 ---
 
@@ -94,50 +105,69 @@ Open a **second** terminal in the project root and run:
 A fully passing run looks like:
 
 ```
-  MCP Server Auth Tests
-  Target : http://127.0.0.1:8000/mcp
+  MCP Server Auth + GET Endpoint Tests
+  Target : http://127.0.0.1:8000
   API Key: vamshibachumcpserver
 
   Server is reachable at http://127.0.0.1:8000
 
 ------------------------------------------------------------
-  TEST 1 - No API key (expect 401)
+  TEST 1 - POST /mcp: no API key (expect 401)
 ------------------------------------------------------------
   [PASS] Request without x-api-key header
          Status: 401 (expected 401)
-         Body  : {"error": "Invalid or missing API key", "code": "AUTH_ERROR"}
 
 ------------------------------------------------------------
-  TEST 2 - Empty API key value (expect 401)
+  TEST 2 - POST /mcp: empty API key (expect 401)
 ------------------------------------------------------------
   [PASS] Request with empty x-api-key value
          Status: 401 (expected 401)
-         Body  : {"error": "Invalid or missing API key", "code": "AUTH_ERROR"}
 
 ------------------------------------------------------------
-  TEST 3 - Wrong API key (expect 401)
+  TEST 3 - POST /mcp: wrong API key (expect 401)
 ------------------------------------------------------------
-  [PASS] Request with incorrect x-api-key value
+  [PASS] Request with incorrect x-api-key
          Status: 401 (expected 401)
-         Body  : {"error": "Invalid or missing API key", "code": "AUTH_ERROR"}
 
 ------------------------------------------------------------
-  TEST 4 - Correct API key (expect 200 + MCP handshake)
+  TEST 4 - POST /mcp: correct API key (expect 200 + MCP handshake)
 ------------------------------------------------------------
   [PASS] Full MCP initialize with valid x-api-key
          Status: 200 (expected 200)
-         Body  : event: message ...
          MCP handshake: protocolVersion confirmed
          MCP handshake: serverInfo confirmed
 
 ------------------------------------------------------------
-  TEST 5 - Correct key, GET method (expect 4xx, not 401)
+  TEST 5 - POST /mcp: correct key, GET method (expect not 401)
 ------------------------------------------------------------
-  [PASS] Auth passed, FastMCP rejected wrong method
-         Status: -1 (not 401 - auth passed; FastMCP rejected the method)
+  [PASS] Auth passed; FastMCP rejected wrong method
+         Status: 400 (not 401 - auth did not block this)
+
+------------------------------------------------------------
+  TEST 6 - GET /health: no key (expect 200 - exempt from auth)
+------------------------------------------------------------
+  [PASS] GET /health without x-api-key (liveness probe)
+         Status: 200 (expected 200)
+         Response: status field present
+         Response: auth_enabled field present
+
+------------------------------------------------------------
+  TEST 7 - GET /info: no key (expect 401)
+------------------------------------------------------------
+  [PASS] GET /info without x-api-key
+         Status: 401 (expected 401)
+
+------------------------------------------------------------
+  TEST 8 - GET /info: correct key (expect 200)
+------------------------------------------------------------
+  [PASS] GET /info with valid x-api-key (server capabilities)
+         Status: 200 (expected 200)
+         Capabilities: version present
+         Capabilities: features present
+         Capabilities: device present
 
 ============================================================
-  RESULT: All 5 tests passed
+  RESULT: All 8 tests passed
 ============================================================
 ```
 
@@ -149,23 +179,35 @@ A fully passing run looks like:
 Client Request
       │
       ▼
- AuthMiddleware (ASGI, guards.py)
-      │  checks scope["headers"] for b"x-api-key"
-      │  compares against MCP_API_KEY env var
+ AuthMiddleware (guards.py)
+      │  GET /health? ──────────────────────────────► HTTP 200  (always, no key needed)
+      │
+      │  all other paths: check x-api-key header
       │
       ├─── key missing or wrong ──► HTTP 401  (request dies here)
       │
-      └─── key correct ───────────► FastMCP streamable_http_app()
-                                          │
-                                          ▼
-                                    MCP Protocol Layer (/mcp)
-                                          │
-                                          ▼
-                                    Tool Execution
+      └─── key correct ────────────────────────────────────────────────────────┐
+                                                                               ▼
+                                                                     MCPRouter (guards.py)
+                                                                           │
+                                                                     ┌─────┴──────┐
+                                                               GET /health    GET /info
+                                                               (200, probe)  (200, caps)
+                                                                           │
+                                                               everything else
+                                                                           │
+                                                                           ▼
+                                                              FastMCP streamable_http_app()
+                                                                    POST /mcp only
+                                                                           │
+                                                                           ▼
+                                                                    Tool Execution
 ```
 
-The `AuthMiddleware` is a pure ASGI class — it runs **before** FastMCP sees the
-request, so no MCP session is ever created for an unauthenticated call.
+`AuthMiddleware` and `MCPRouter` are pure ASGI classes in `guards.py`. Auth
+runs before anything else, so no MCP session is ever created for an
+unauthenticated call. `GET /health` is whitelisted in `_AUTH_EXEMPT_PATHS` so
+load-balancers and Kubernetes probes can always reach it.
 
 ---
 
@@ -175,6 +217,7 @@ request, so no MCP session is ever created for an unauthenticated call.
 |---------|--------------|-----|
 | `[ERROR] Server not reachable` | Server not started | Run `python -m mcp_server --transport streamable-http` |
 | Test 4 fails with 401 | Wrong key in `.env` | Check `MCP_API_KEY` in root `.env` matches `-ApiKey` param |
-| Test 4 fails with 406 | `Accept` header mismatch | Script issue — ensure the script hasn't been modified |
+| Test 6 (`/health`) fails with 401 | `_AUTH_EXEMPT_PATHS` not applied | Restart server after code changes |
+| Test 8 (`/info`) fails with 401 | Wrong key passed | Confirm `-ApiKey vamshibachumcpserver` matches root `.env` |
 | `Auth: disabled` in server startup | `MCP_API_KEY` not set | Add `MCP_API_KEY=vamshibachumcpserver` to root `.env` |
 | All tests return connection error | Port conflict | Change port: `python -m mcp_server --port 9000` and pass `-Port 9000` to the script |

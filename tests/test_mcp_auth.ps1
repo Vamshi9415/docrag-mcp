@@ -19,12 +19,7 @@ function Write-Section([string]$Title) {
 }
 
 function Assert-Status {
-    param(
-        [string]$TestName,
-        [int]   $Got,
-        [int]   $Expected,
-        [string]$Body = ""
-    )
+    param([string]$TestName,[int]$Got,[int]$Expected,[string]$Body = "")
     if ($Got -eq $Expected) {
         Write-Host "  [PASS] $TestName" -ForegroundColor Green
         Write-Host "         Status: $Got (expected $Expected)" -ForegroundColor DarkGreen
@@ -34,20 +29,16 @@ function Assert-Status {
         Write-Host "         Status: $Got (expected $Expected)" -ForegroundColor DarkRed
         $script:FAIL++
     }
-    if ($Body) {
-        Write-Host "         Body  : $($Body.Substring(0, [Math]::Min(120, $Body.Length)))" -ForegroundColor DarkGray
-    }
+    if ($Body) { Write-Host "         Body  : $($Body.Substring(0, [Math]::Min(120, $Body.Length)))" -ForegroundColor DarkGray }
 }
 
-function Invoke-McpRequest {
-    param(
-        [hashtable]$Headers,
-        [string]   $Body   = $MCP_BODY,
-        [string]   $Method = "POST"
-    )
+function Invoke-Http {
+    param([string]$Url,[string]$Method="GET",[hashtable]$Headers=@{},[string]$Body="")
     $result = @{ status = 0; body = "" }
     try {
-        $resp = Invoke-WebRequest -Uri $McpUrl -Method $Method -Headers $Headers -Body $Body -UseBasicParsing -ErrorAction Stop
+        $params = @{ Uri=$Url; Method=$Method; Headers=$Headers; UseBasicParsing=$true; ErrorAction="Stop" }
+        if ($Body -ne "") { $params["Body"] = $Body }
+        $resp = Invoke-WebRequest @params
         $result.status = [int]$resp.StatusCode
         $result.body   = $resp.Content
     } catch {
@@ -55,78 +46,83 @@ function Invoke-McpRequest {
             $result.status = [int]$_.Exception.Response.StatusCode.value__
             $stream = $_.Exception.Response.GetResponseStream()
             if ($stream) { $result.body = [System.IO.StreamReader]::new($stream).ReadToEnd() }
-        } else {
-            $result.status = -1
-            $result.body   = $_.Exception.Message
-        }
+        } else { $result.status = -1; $result.body = $_.Exception.Message }
     }
     return $result
 }
 
 Write-Host ""
-Write-Host "  MCP Server Auth Tests" -ForegroundColor White
-Write-Host "  Target : $McpUrl" -ForegroundColor DarkGray
+Write-Host "  MCP Server Auth + GET Endpoint Tests" -ForegroundColor White
+Write-Host "  Target : $BaseUrl" -ForegroundColor DarkGray
 Write-Host "  API Key: $ApiKey" -ForegroundColor DarkGray
 Write-Host ""
-
-try {
-    Invoke-WebRequest -Uri "${BaseUrl}/mcp" -Method GET -UseBasicParsing -ErrorAction Stop | Out-Null
-} catch {
-    if (-not $_.Exception.Response) {
-        Write-Host "  [ERROR] Server not reachable at $BaseUrl" -ForegroundColor Red
-        Write-Host "          Start the server first:" -ForegroundColor Yellow
-        Write-Host "            python -m mcp_server --transport streamable-http --port $Port" -ForegroundColor Yellow
-        exit 1
-    }
+$ping = Invoke-Http -Url "${BaseUrl}/health"
+if ($ping.status -le 0) {
+    Write-Host "  [ERROR] Server not reachable at $BaseUrl" -ForegroundColor Red
+    Write-Host "          Start it: python -m mcp_server --transport streamable-http --port $Port" -ForegroundColor Yellow
+    exit 1
 }
 Write-Host "  Server is reachable at $BaseUrl" -ForegroundColor DarkGreen
 
-# TEST 1 - No API key
-Write-Section "TEST 1 - No API key (expect 401)"
-$h = @{ "Content-Type" = "application/json"; "Accept" = "application/json, text/event-stream" }
-$r = Invoke-McpRequest -Headers $h
-Assert-Status -TestName "Request without x-api-key header" -Got $r.status -Expected 401 -Body $r.body
+# ── MCP /mcp endpoint auth tests ────────────────────────────────────────────
 
-# TEST 2 - Empty API key
-Write-Section "TEST 2 - Empty API key value (expect 401)"
-$h = @{ "x-api-key" = ""; "Content-Type" = "application/json"; "Accept" = "application/json, text/event-stream" }
-$r = Invoke-McpRequest -Headers $h
-Assert-Status -TestName "Request with empty x-api-key value" -Got $r.status -Expected 401 -Body $r.body
+Write-Section "TEST 1 - POST /mcp: no API key (expect 401)"
+$r = Invoke-Http -Url $McpUrl -Method POST -Headers @{"Content-Type"="application/json";"Accept"="application/json, text/event-stream"} -Body $MCP_BODY
+Assert-Status "Request without x-api-key header" $r.status 401 $r.body
 
-# TEST 3 - Wrong API key
-Write-Section "TEST 3 - Wrong API key (expect 401)"
-$h = @{ "x-api-key" = "wrongkey-totally-invalid-12345"; "Content-Type" = "application/json"; "Accept" = "application/json, text/event-stream" }
-$r = Invoke-McpRequest -Headers $h
-Assert-Status -TestName "Request with incorrect x-api-key value" -Got $r.status -Expected 401 -Body $r.body
+Write-Section "TEST 2 - POST /mcp: empty API key (expect 401)"
+$r = Invoke-Http -Url $McpUrl -Method POST -Headers @{"x-api-key"="";"Content-Type"="application/json";"Accept"="application/json, text/event-stream"} -Body $MCP_BODY
+Assert-Status "Request with empty x-api-key value" $r.status 401 $r.body
 
-# TEST 4 - Correct API key
-Write-Section "TEST 4 - Correct API key (expect 200 + MCP handshake)"
-$h = @{ "x-api-key" = $ApiKey; "Content-Type" = "application/json"; "Accept" = "application/json, text/event-stream" }
-$r = Invoke-McpRequest -Headers $h
-Assert-Status -TestName "Full MCP initialize with valid x-api-key" -Got $r.status -Expected 200 -Body $r.body
+Write-Section "TEST 3 - POST /mcp: wrong API key (expect 401)"
+$r = Invoke-Http -Url $McpUrl -Method POST -Headers @{"x-api-key"="wrongkey-invalid-12345";"Content-Type"="application/json";"Accept"="application/json, text/event-stream"} -Body $MCP_BODY
+Assert-Status "Request with incorrect x-api-key" $r.status 401 $r.body
+
+Write-Section "TEST 4 - POST /mcp: correct API key (expect 200 + MCP handshake)"
+$r = Invoke-Http -Url $McpUrl -Method POST -Headers @{"x-api-key"=$ApiKey;"Content-Type"="application/json";"Accept"="application/json, text/event-stream"} -Body $MCP_BODY
+Assert-Status "Full MCP initialize with valid x-api-key" $r.status 200 $r.body
 if ($r.status -eq 200) {
     if ($r.body -match '"protocolVersion"') { Write-Host "         MCP handshake: protocolVersion confirmed" -ForegroundColor DarkGreen }
     if ($r.body -match '"serverInfo"')      { Write-Host "         MCP handshake: serverInfo confirmed" -ForegroundColor DarkGreen }
 }
 
-# TEST 5 - Correct key, wrong HTTP method (GET instead of POST)
-# Auth passes but FastMCP rejects the method - proves auth middleware runs first
-Write-Section "TEST 5 - Correct key, GET method (expect 4xx, not 401)"
-$h = @{ "x-api-key" = $ApiKey; "Accept" = "application/json, text/event-stream" }
-$r = Invoke-McpRequest -Headers $h -Method "GET"
-$got = $r.status
-$pass5 = ($got -ne 401)
+Write-Section "TEST 5 - POST /mcp: correct key, GET method (expect not 401)"
+$r = Invoke-Http -Url $McpUrl -Method GET -Headers @{"x-api-key"=$ApiKey;"Accept"="application/json, text/event-stream"}
+$pass5 = ($r.status -ne 401)
 if ($pass5) {
-    Write-Host "  [PASS] Auth passed, FastMCP rejected wrong method" -ForegroundColor Green
-    Write-Host "         Status: $got (not 401 - auth passed; FastMCP rejected the method)" -ForegroundColor DarkGreen
+    Write-Host "  [PASS] Auth passed; FastMCP rejected wrong method" -ForegroundColor Green
+    Write-Host "         Status: $($r.status) (not 401 - auth did not block this)" -ForegroundColor DarkGreen
     $PASS++
 } else {
     Write-Host "  [FAIL] GET /mcp with valid key" -ForegroundColor Red
-    Write-Host "         Status: $got (expected any status other than 401)" -ForegroundColor DarkRed
+    Write-Host "         Status: $($r.status) (expected any status other than 401)" -ForegroundColor DarkRed
     $FAIL++
 }
 
-# Summary
+# ── New GET endpoints ────────────────────────────────────────────────────────
+
+Write-Section "TEST 6 - GET /health: no key (expect 200 - exempt from auth)"
+$r = Invoke-Http -Url "${BaseUrl}/health" -Method GET
+Assert-Status "GET /health without x-api-key (liveness probe)" $r.status 200 $r.body
+if ($r.status -eq 200) {
+    if ($r.body -match '"status"')      { Write-Host "         Response: status field present" -ForegroundColor DarkGreen }
+    if ($r.body -match '"auth_enabled"') { Write-Host "         Response: auth_enabled field present" -ForegroundColor DarkGreen }
+}
+
+Write-Section "TEST 7 - GET /info: no key (expect 401)"
+$r = Invoke-Http -Url "${BaseUrl}/info" -Method GET
+Assert-Status "GET /info without x-api-key" $r.status 401 $r.body
+
+Write-Section "TEST 8 - GET /info: correct key (expect 200)"
+$r = Invoke-Http -Url "${BaseUrl}/info" -Method GET -Headers @{"x-api-key"=$ApiKey}
+Assert-Status "GET /info with valid x-api-key (server capabilities)" $r.status 200 $r.body
+if ($r.status -eq 200) {
+    if ($r.body -match '"version"')  { Write-Host "         Capabilities: version present" -ForegroundColor DarkGreen }
+    if ($r.body -match '"features"') { Write-Host "         Capabilities: features present" -ForegroundColor DarkGreen }
+    if ($r.body -match '"device"')   { Write-Host "         Capabilities: device present" -ForegroundColor DarkGreen }
+}
+
+# ── Summary ──────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host ("=" * 60) -ForegroundColor DarkGray
 $total = $PASS + $FAIL
@@ -139,4 +135,3 @@ Write-Host ("=" * 60) -ForegroundColor DarkGray
 Write-Host ""
 
 exit $FAIL
-
