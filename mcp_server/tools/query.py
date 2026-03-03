@@ -26,9 +26,10 @@ from mcp_server.services.chunking import AdaptiveChunkingStrategy
 from mcp_server.services.retrieval import EnhancedRetriever
 from mcp_server.services.cache import (
     get_cached_document, put_cached_document,
-    get_cached_retriever, put_cached_retriever,
+    get_retriever_with_disk_fallback, put_retriever_with_disk,
 )
 from mcp_server.core.models import get_embeddings_fast, get_embeddings_accurate
+from mcp_server.core.concurrency import run_in_gpu_pool, coalesced_build
 
 from mcp_server.processors import detect_document_type, TargetedDocumentProcessor
 from mcp_server.core.logging import get_logger
@@ -211,58 +212,63 @@ async def retrieve_chunks(
                      extra={"tool": "retrieve_chunks"})
         return {"results": [], "total_chunks_indexed": 0}
 
-    # Build retriever (cached)
-    retriever = get_cached_retriever(url_hash)
+    # Build retriever (memory cache → disk → build fresh)
+    # Disk loading auto-selects the correct embedding model from saved metadata.
+    retriever, source = get_retriever_with_disk_fallback(url_hash)
     if retriever is not None:
         total_chunks = len(retriever.chunks)
         _logger.info("rag.step.4.retriever_cache_hit",
                      extra={"tool": "retrieve_chunks",
-                            "detail": f"reusing cached FAISS index with {total_chunks} chunks"})
+                            "detail": f"reusing {source} FAISS index with {total_chunks} chunks"})
     else:
-        doc_type = detect_document_type(document_url)
+        # ── Coalesced build: only ONE coroutine builds per url_hash ──
+        async def _build_index():
+            # Re-check cache (another coroutine may have finished building)
+            ret, src = get_retriever_with_disk_fallback(url_hash)
+            if ret is not None:
+                return ret, len(ret.chunks)
 
-        _logger.info("rag.step.4.chunking — splitting into chunks",
-                     extra={"tool": "retrieve_chunks", "detail": f"doc_type={doc_type}"})
-        chunks = AdaptiveChunkingStrategy.create_chunks(processed.content, doc_type)
+            doc_type = detect_document_type(document_url)
 
-        if not chunks:
+            _logger.info("rag.step.4.chunking — splitting into chunks",
+                         extra={"tool": "retrieve_chunks", "detail": f"doc_type={doc_type}"})
+            chunks = AdaptiveChunkingStrategy.create_chunks(processed.content, doc_type)
+
+            if not chunks:
+                return None, 0
+
+            _logger.info("rag.step.4.chunking.done",
+                         extra={"tool": "retrieve_chunks",
+                                "detail": f"created {len(chunks)} chunks"})
+
+            emb_model = "fast" if len(chunks) <= 50 else "accurate"
+            emb = get_embeddings_fast() if len(chunks) <= 50 else get_embeddings_accurate()
+
+            _logger.info("rag.step.5.embedding — building FAISS vector index",
+                         extra={"tool": "retrieve_chunks",
+                                "detail": f"model={emb_model}, chunks={len(chunks)}"})
+
+            # GPU-semaphore-guarded FAISS build
+            ret = await run_in_gpu_pool(EnhancedRetriever, emb, chunks, emb_model)
+            put_retriever_with_disk(url_hash, ret)
+
+            _logger.info("rag.step.5.embedding.done — FAISS index built & persisted to disk",
+                         extra={"tool": "retrieve_chunks",
+                                "detail": f"indexed {len(chunks)} chunks"})
+            return ret, len(chunks)
+
+        retriever, total_chunks = await coalesced_build(url_hash, _build_index)
+        if retriever is None:
             _logger.info("rag.step.abort — no chunks created",
                          extra={"tool": "retrieve_chunks"})
             return {"results": [], "total_chunks_indexed": 0}
 
-        _logger.info("rag.step.4.chunking.done",
-                     extra={"tool": "retrieve_chunks",
-                            "detail": f"created {len(chunks)} chunks"})
-
-        # Fast model is sufficient for small-to-medium docs;
-        # cross-encoder reranking compensates for any precision gap.
-        embedding_model = "fast" if len(chunks) <= 50 else "accurate"
-        embeddings = get_embeddings_fast() if len(chunks) <= 50 else get_embeddings_accurate()
-
-        _logger.info("rag.step.5.embedding — building FAISS vector index",
-                     extra={"tool": "retrieve_chunks",
-                            "detail": f"model={embedding_model}, chunks={len(chunks)}"})
-
-        loop = asyncio.get_running_loop()
-        retriever = await loop.run_in_executor(
-            None, lambda: EnhancedRetriever(embeddings, chunks)
-        )
-        put_cached_retriever(url_hash, retriever)
-        total_chunks = len(chunks)
-
-        _logger.info("rag.step.5.embedding.done — FAISS index built",
-                     extra={"tool": "retrieve_chunks",
-                            "detail": f"indexed {total_chunks} chunks"})
-
-    # Retrieve
+    # Retrieve — GPU-semaphore-guarded vector search + rerank
     _logger.info("rag.step.6.retrieval — vector search + rerank",
                  extra={"tool": "retrieve_chunks",
                         "detail": f"query='{query[:100]}', top_k={top_k}"})
 
-    loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(
-        None, lambda: retriever.retrieve(query, top_k=top_k)
-    )
+    results = await run_in_gpu_pool(retriever.retrieve, query, top_k)
 
     _logger.info("rag.step.6.retrieval.done",
                  extra={"tool": "retrieve_chunks",

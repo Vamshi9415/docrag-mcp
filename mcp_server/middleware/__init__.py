@@ -70,7 +70,12 @@ def guarded(*, timeout: int | None = None):
             try:
                 # ── guards ────────────────────────────────────────
                 check_auth()
-                check_rate_limit(tool_name)
+
+                # Try to extract API key from kwargs for per-user rate limiting
+                _api_key = ""
+                if "api_key" in kwargs:
+                    _api_key = str(kwargs.get("api_key", ""))
+                check_rate_limit(tool_name, api_key=_api_key)
 
                 logger.info(
                     "tool.start",

@@ -391,3 +391,419 @@ The restructure keeps **every user-facing capability identical** but rebuilds th
 | Response extraction | Added `_extract_ai_answer()` handling string and list content from Gemini |
 | Fallback | Added `_fallback_from_tool_result()` — formats tool output directly when LLM returns empty |
 | Null byte sanitization | Added `_sanitize_text()` across all processors and tools to strip `\x00` characters |
+
+---
+
+## 12. FAISS Disk Persistence (v2.2)
+
+**What:** Added persistent FAISS index storage to disk so vector indexes survive server restarts.
+
+- `config.py` — Added `FAISS_INDEX_PATH = os.path.join(BASE_DIR, "faiss_indexes")` with auto-create.
+- `retrieval.py` — Added `save_to_disk(url_hash)` and `load_from_disk(url_hash, embeddings)` class methods to `EnhancedRetriever`. Saves `index.faiss`, `index.pkl`, and `chunks_meta.json` per URL hash.
+- `cache.py` — Added `get_retriever_with_disk_fallback()`, `put_retriever_with_disk()`, `clear_faiss_disk()`, `faiss_disk_stats()`. Updated `clear_all()` and `cache_stats()`.
+- `query.py` + `api.py` — Retriever lookup now follows a three-tier chain: **memory cache → disk → build fresh**.
+- `.gitignore` — Added `faiss_indexes/`.
+
+**Why:** Without disk persistence, every server restart required re-downloading, re-processing, and re-embedding every document — a process that takes 5-15 seconds per document. With disk persistence, the first request after a restart loads a pre-built FAISS index from disk in ~0.1 seconds. This is the standard production pattern for FAISS-based systems.
+
+**Lookup chain:** `memory TTL cache (instant)` → `disk index (~0.1s load)` → `build fresh (~5-15s)`.
+
+---
+
+## 13. Multi-Worker Support (v2.2)
+
+**What:** Added `--workers N` CLI flag to `__main__.py` for running multiple uvicorn worker processes.
+
+- Uses uvicorn's factory-string import pattern (`"module:factory"`) instead of passing app objects, which is required for proper multi-process forking.
+- `--reload` forces `workers=1` (uvicorn limitation).
+- Defaults to 1 worker.
+
+**Why:** A single-process server can only use one CPU core and one GIL. Heavy embedding or document processing in one request blocks all other requests. With `--workers 4`, uvicorn forks 4 independent processes, each with its own Python interpreter, models, and FAISS indexes — enabling true parallel request handling on multi-core machines.
+
+---
+
+## 14. Concurrency Hardening (v2.3) — Tier 1 Production Improvements
+
+**What:** Four interconnected changes that make the server safe for concurrent multi-user production traffic.
+
+### 14a. Async HTTP Downloads (`httpx`)
+
+**What:** Replaced synchronous `requests.get()` (wrapped in `run_in_executor`) with native `httpx.AsyncClient` in `services/downloader.py`.
+
+- Module-level singleton `httpx.AsyncClient` with connection pooling (20 max connections, 10 keep-alive)
+- `close_client()` function called during server lifespan shutdown
+- Same retry logic (3 retries, `[1, 3, 5]s` backoff) preserved
+- Added `httpx` to `requirements.txt`
+
+**Why:** The old `requests.get()` is synchronous — even inside `run_in_executor`, it consumes a thread from the default thread pool for the entire duration of the download. With 10 concurrent requests, that's 10 threads blocked on I/O, potentially starving the pool for other work (FAISS build, text extraction).
+
+`httpx.AsyncClient` is truly non-blocking: the download runs on the event loop using `asyncio` sockets. Zero threads consumed during network I/O. Connection pooling also means TCP connections to the same host are reused rather than opened/closed per request.
+
+| Metric | Before (`requests`) | After (`httpx`) |
+|--------|-------------------|-----------------|
+| Threads per download | 1 (from default pool) | 0 (event-loop I/O) |
+| Connection reuse | None (new socket per request) | Keep-alive pool (10 connections) |
+| Concurrent downloads | Limited by thread pool (40 default) | Limited by connection pool (20) |
+| Event-loop blocking | Indirect (pool exhaustion) | None |
+
+### 14b. GPU / Embedding Semaphore
+
+**What:** Created `core/concurrency.py` with:
+- `asyncio.Semaphore` limiting concurrent GPU/embedding operations (default 2, override via `GPU_CONCURRENCY` env var)
+- Dedicated `ThreadPoolExecutor` ("gpu-pool") for FAISS build and retrieval operations
+- `run_in_gpu_pool(fn, *args)` — awaitable function that acquires the semaphore, then runs the function in the dedicated pool
+
+**Integration:**
+- `query.py` — `EnhancedRetriever(embeddings, chunks)` and `retriever.retrieve(query, top_k)` now run via `run_in_gpu_pool()` instead of `run_in_executor(None, ...)`
+- `api.py` — same changes in the REST `/api/retrieve-chunks` endpoint
+
+**Why:** Without a semaphore, if 10 users hit `retrieve_chunks` simultaneously for 10 different documents, the server attempts to build 10 FAISS indexes in parallel. Each FAISS build:
+- Allocates ~50-200 MB RAM for embedding vectors
+- Uses 100% of one CPU core (or GPU) for encoding
+- Takes 3-10 seconds
+
+With 10 in parallel: **500 MB - 2 GB sudden RAM spike**, CPU at 1000%, potential OOM kill. The semaphore (default 2) ensures only 2 heavy operations run at once — the other 8 wait their turn on the event loop (not blocking anything), then proceed when a slot opens.
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Max concurrent FAISS builds | Unlimited | 2 (configurable) |
+| RAM usage under burst | O(N × index_size) | O(2 × index_size) |
+| Thread pool | Default (shared with I/O) | Dedicated "gpu-pool" |
+| Backpressure | None (OOM crash) | Semaphore queue |
+
+### 14c. FAISS Build Coalescing
+
+**What:** Added per-URL `asyncio.Lock` system in `core/concurrency.py`:
+- `coalesced_build(url_hash, build_fn)` — acquires a lock keyed by `url_hash`, then calls the async `build_fn`
+- If 10 requests arrive for the *same* URL simultaneously, only the **first** builds the FAISS index; the other 9 wait on the lock, then find the result in cache
+
+**Integration:**
+- `query.py` — the entire "chunk → embed → build FAISS → persist" block is wrapped in `coalesced_build(url_hash, _build_index)`. The `_build_index` coroutine re-checks cache before building (the "double-check" pattern).
+- `api.py` — same pattern in `/api/retrieve-chunks`
+
+**Why:** Without coalescing, 10 concurrent requests for the same PDF document would each independently:
+1. Download the PDF (cached, so fast)
+2. Extract text (cached, so fast)
+3. Build a FAISS index (~5-10 seconds each)
+
+That's 10 identical FAISS builds running simultaneously — a total waste of ~50-100 seconds of CPU time, only to produce the same index 10 times. With coalescing, ONE request builds the index, the other 9 wait ~5-10 seconds and then read from cache. Total CPU time: ~5-10 seconds instead of ~50-100 seconds.
+
+| Scenario | Before | After |
+|----------|--------|-------|
+| 10 requests, same URL, cold cache | 10 FAISS builds (~50-100s CPU) | 1 build + 9 cache reads (~5-10s CPU) |
+| 10 requests, 10 different URLs | 10 parallel builds | 10 builds, 2 at a time (semaphore) |
+| Request arrives mid-build for same URL | Starts a new build | Waits for existing build |
+
+### 14d. Per-User Rate Limiting
+
+**What:** Replaced the single `_global_bucket` in `middleware/guards.py` with a **two-tier** rate limiting system:
+
+- **Per-user bucket**: Each API key (or `"anonymous"`) gets its own `_TokenBucket` at `rate_limit_rpm` (default 60) requests per minute
+- **Global bucket**: A server-wide bucket at 5× the per-user rate (default 300 rpm) prevents total load from exceeding hardware capacity
+- `check_rate_limit(tool_name, api_key)` — checks per-user first, then global; refunds user token if global rejects
+- `_MAX_USER_BUCKETS = 1000` with FIFO eviction to prevent memory leak from key enumeration attacks
+- Updated `guarded` decorator in `middleware/__init__.py` to pass API key through
+- Updated `api.py`'s HTTP middleware to pass `x-api-key` header to `check_rate_limit`
+
+**Why:** A single global bucket means one aggressive user can exhaust the rate limit for ALL users. If User A makes 60 requests in 1 minute, User B gets "Rate limit exceeded" even though they haven't made a single request.
+
+Per-user buckets isolate users from each other: each user gets their own 60 rpm allowance. The global bucket (300 rpm) acts as a safety net — even if 100 users each have tokens remaining, the server won't accept more than 300 rpm total, protecting the hardware.
+
+| Scenario | Before (global only) | After (per-user + global) |
+|----------|---------------------|--------------------------|
+| User A: 60 rpm, User B: 0 rpm | User B blocked (bucket empty) | User B has full 60 rpm |
+| 10 users, each 30 rpm | Rejected at 60 total (2 users) | All pass (300 total < 300 global) |
+| 1 user, 100 rpm | Blocked at 60 | Blocked at 60 (per-user limit) |
+| Key enumeration attack | N/A | FIFO eviction at 1000 buckets |
+
+### Summary of Changes
+
+| File | Change |
+|------|--------|
+| `services/downloader.py` | `requests` → `httpx.AsyncClient` with connection pooling |
+| `core/concurrency.py` | **NEW** — GPU semaphore + FAISS build coalescing primitives |
+| `middleware/guards.py` | Single global bucket → per-user + global two-tier rate limiting |
+| `middleware/__init__.py` | Pass API key to `check_rate_limit()` |
+| `tools/query.py` | `run_in_executor` → `run_in_gpu_pool` + `coalesced_build` |
+| `api.py` | Same — `run_in_executor` → `run_in_gpu_pool` + `coalesced_build` + per-user rate limit |
+| `server.py` | Call `close_client()` on shutdown to close httpx client |
+| `requirements.txt` | Added `httpx` |
+
+### New Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GPU_CONCURRENCY` | `2` | Max concurrent FAISS build / retrieval operations |
+
+---
+
+## 15. File Upload Endpoint + Client Auto-Upload (v2.4)
+
+**What:** Added a `POST /api/upload` endpoint to the REST API and automatic local-file detection in the client agent.
+
+### The Problem
+
+Every tool on the MCP server requires a **public HTTP URL** (`document_url`). This creates a friction point:
+
+```
+User: "Get me the phone number of Vamshi from D:\docs\contacts.xlsx"
+Server: ❌ Can't process — D:\docs\contacts.xlsx is a local path, not an HTTP URL
+```
+
+The user has to manually:
+1. Start a separate HTTP server (`python -m http.server 8080` on the `docs/` folder)
+2. Rewrite their query with `http://localhost:8080/contacts.xlsx`
+
+This is fine for development but annoying for daily use. Production RAG systems (ChatGPT, Google NotebookLM, Vectara) all accept direct file uploads — users don't think in URLs.
+
+### The Solution
+
+**Server side (`api.py`):**
+- New `POST /api/upload` endpoint accepting `multipart/form-data`
+- Saves files to `temp_files/uploads/` with UUID-prefixed names (collision-safe)
+- Returns a `document_url` pointing to the server's own static file serving (`/uploads/...`)
+- 50 MB size limit, extension whitelist (PDF, DOCX, PPTX, XLSX, CSV, TXT, HTML, PNG, JPEG)
+- Static file serving via FastAPI `StaticFiles` mount
+
+**Client side (`agent.py`):**
+- `_resolve_local_paths(query)` — regex detects local file paths in user queries
+- `_upload_local_file(path)` — uploads the file to `POST /api/upload` via `httpx`
+- Automatically replaces the local path in the query with the server-hosted URL
+- Zero user friction — just paste a local path and it works
+
+### Flow
+
+```
+User: "Get me phone of Vamshi from D:\docs\contacts.xlsx"
+                    ↓
+Client detects D:\docs\contacts.xlsx is a local file
+                    ↓
+Client POSTs file to http://127.0.0.1:8000/api/upload
+                    ↓
+Server saves to temp_files/uploads/a1b2c3d4e5f6_contacts.xlsx
+Server returns: {"document_url": "http://127.0.0.1:8000/uploads/a1b2c3d4e5f6_contacts.xlsx"}
+                    ↓
+Client replaces path in query:
+  "Get me phone of Vamshi from http://127.0.0.1:8000/uploads/a1b2c3d4e5f6_contacts.xlsx"
+                    ↓
+LLM calls retrieve_chunks / query_spreadsheet with the URL
+                    ↓
+Server downloads from itself (localhost → instant), processes, returns results
+```
+
+### Why This Pattern (Not Direct File Bytes in Tools)
+
+We could have added a `file_bytes` parameter to every tool, but that would:
+- Change the signature of all 13 tools (breaking change)
+- Require base64 encoding (bloated payloads, MCP protocol overhead)
+- Bypass the existing download cache (no deduplication)
+
+The upload-then-URL pattern keeps all existing tools unchanged. The uploaded file goes through the exact same download → cache → process → chunk → index pipeline as any HTTP URL.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `mcp_server/api.py` | Added `POST /api/upload`, `StaticFiles` mount for `/uploads/`, extension validation |
+| `client/agent.py` | Added `_upload_local_file()`, `_resolve_local_paths()`, auto-detect in `run_query()` |
+| `client/requirements.txt` | Added `httpx` for async upload |
+
+---
+
+## 16. Bug Fix Audit & Corrections (v2.5)
+
+**What:** A comprehensive audit of the entire codebase uncovered 1 critical bug, 1 moderate bug, and 2 code-quality risks. All four were fixed and covered by new tests (144 tests, 0 failures).
+
+### 16a. CRITICAL — Embedding Model Vector-Space Mismatch
+
+**The Problem:**
+
+The server uses two embedding models — `all-MiniLM-L6-v2` ("fast") and `BAAI/bge-small-en-v1.5` ("accurate"). Both produce 384-dimensional vectors, but they live in **different vector spaces** — a vector from one model is meaningless to the other.
+
+Three independent bugs combined to create silently wrong search results:
+
+| Location | What It Did | What It Should Have Done |
+|----------|-------------|------------------------|
+| `query.py` (MCP transport) | ≤50 chunks → `fast`, >50 → `accurate` | OK — intentional threshold |
+| `api.py` (REST transport) | <100 chunks → `accurate`, ≥100 → `fast` | Same threshold as query.py (was opposite) |
+| Both files (disk loading) | **Always** loaded with `get_embeddings_fast()` | Load with the **same model** that was used to build the index |
+| `retrieval.py` (sidecar) | Did NOT record which model built the index | Must record it so load can use the correct model |
+
+**How it manifested (timeline):**
+
+```
+T=0    User queries a 200-chunk PDF via REST API
+       → api.py picks get_embeddings_fast() (≥100 chunks)
+       → FAISS index built with MiniLM vectors ✓
+       → Query runs with MiniLM vectors ✓ — results are correct
+
+T=5    Same user queries the same PDF again
+       → Cache hit (memory) — still using MiniLM vectors ✓
+
+T=31m  Cache TTL expires (30 min default)
+
+T=32m  User queries the same PDF a third time
+       → Memory cache miss
+       → Disk fallback: loads index.faiss with get_embeddings_fast() ✓ (happens to match)
+       → Results still correct by luck
+
+T=33m  User queries a 200-chunk PDF via MCP transport (different entry point)
+       → query.py picks get_embeddings_accurate() (>50 chunks)
+       → FAISS index built with BGE vectors, saved to disk
+       → Query runs with BGE vectors ✓ — correct
+
+T=64m  Cache TTL expires again
+
+T=65m  User queries the same PDF via either transport
+       → Memory cache miss
+       → Disk fallback: loads index.faiss with get_embeddings_fast() ← WRONG MODEL
+       → MiniLM queries a BGE-built vector space
+       → Results are SILENTLY WRONG — no error, just irrelevant chunks
+```
+
+The bug is particularly dangerous because:
+- It causes **no error or warning** — the dimensions match (both 384), so FAISS happily returns results
+- It only manifests **after cache expiry** (30+ minutes), making it nearly impossible to catch in development
+- The two transports (MCP vs REST) had **opposite threshold logic**, so the same document could be built with different models depending on which API was called first
+
+**The Fix:**
+
+1. **`retrieval.py` — Save which model built the index:** `save_to_disk()` now writes an `index_meta.json` sidecar alongside `index.faiss`:
+   ```json
+   {"embedding_model": "accurate"}
+   ```
+
+2. **`retrieval.py` — Auto-select correct model on load:** `load_from_disk()` reads `index_meta.json` and automatically uses the matching embedding model. If the file is missing (legacy indexes), it defaults to `"fast"` for backwards compatibility.
+
+3. **`query.py` and `api.py` — Unified threshold:** Both now use the same logic: `≤50 chunks → fast, >50 chunks → accurate`. The REST API's opposite threshold (`<100 → accurate`) was a copy-paste error.
+
+4. **`query.py` and `api.py` — Pass model name to constructor:** `EnhancedRetriever(emb, chunks, emb_model)` stores the model name so `save_to_disk()` can persist it.
+
+5. **`query.py` and `api.py` — Remove hardcoded fast on load:** Disk loading now calls `get_retriever_with_disk_fallback(url_hash)` with no embeddings argument — the retriever auto-selects from saved metadata.
+
+**Files changed:** `services/retrieval.py`, `services/cache.py`, `tools/query.py`, `api.py`
+
+### 16b. MODERATE — REST API Had No Lifespan (No Startup/Shutdown Hooks)
+
+**The Problem:**
+
+The FastAPI `app` in `api.py` was created without a `lifespan` context manager. This caused two issues:
+
+1. **No model pre-loading on startup:** The first REST API request that needed embeddings triggered a 15–20s model load, making the first user experience slow and confusing. The MCP transport (`server.py`) already had eager loading — the REST transport was missing it.
+
+2. **No httpx client shutdown:** The `httpx.AsyncClient` singleton in `downloader.py` was never closed when the REST server stopped, leaking TCP connections and potentially causing `ResourceWarning` on shutdown.
+
+**The Fix:**
+
+Added a `lifespan` async context manager to the FastAPI app:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("api.startup — pre-loading ML models")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _ensure_models_loaded)
+    logger.info("api.startup — models ready")
+    yield
+    logger.info("api.shutdown — closing httpx client")
+    await close_client()
+    logger.info("api.shutdown — done")
+
+app = FastAPI(..., lifespan=lifespan)
+```
+
+- **Startup:** ML models load eagerly (in a thread to avoid blocking the event loop) before the server starts accepting requests.
+- **Shutdown:** The shared `httpx.AsyncClient` is closed cleanly, releasing all TCP connections.
+
+**Files changed:** `api.py`
+
+### 16c. LOW — Downloader Retried 4xx Client Errors (Pointless 9s Delay)
+
+**The Problem:**
+
+The download retry logic caught `httpx.HTTPStatusError` (which covers ALL HTTP errors) and retried 3 times with `[1s, 3s, 5s]` backoff. This means a `404 Not Found` or `403 Forbidden` would waste **9 seconds** retrying a request that will never succeed — the resource doesn't exist or the client isn't authorized.
+
+Only **5xx server errors** (502, 503, 504) are transient and worth retrying. 4xx errors are permanent client-side problems.
+
+**The Fix:**
+
+Split the exception handler into two branches:
+
+```python
+except httpx.HTTPStatusError as exc:
+    if exc.response.status_code < 500:
+        raise DownloadError(...)  # fail immediately for 4xx
+    # else: retry for 5xx (existing backoff logic)
+
+except (httpx.RequestError, httpx.TimeoutException) as exc:
+    # retry for network/timeout errors (existing backoff logic)
+```
+
+**Impact:** A 404 URL now fails in ~0.5s instead of ~10s. No behavior change for valid URLs or genuine server errors.
+
+**Files changed:** `services/downloader.py`
+
+### 16d. LOW — HTML Processor Re-Downloaded Content via WebBaseLoader
+
+**The Problem:**
+
+When processing an HTML document, the processor already had `file_content` (the raw bytes downloaded earlier). But instead of parsing those bytes directly, it used `WebBaseLoader(file_path)` which **re-downloads the content from the URL**. This caused:
+
+1. **Wasted bandwidth** — downloading the same file twice
+2. **Potential deadlock** — on a single-worker server, if the HTML was served by the server itself (uploaded file), `WebBaseLoader` would make an HTTP request back to the same server, which is blocked serving the current request → deadlock
+3. **Fragility** — if the URL was temporary or required auth, the re-download could fail even though the content was already in memory
+
+**The Fix:**
+
+Replaced `WebBaseLoader(file_path)` with direct `BeautifulSoup` parsing of the already-downloaded content:
+
+```python
+elif doc_type == "html":
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(text, "html.parser")
+        text = soup.get_text(separator="\n", strip=True)
+    except Exception:
+        pass  # keep raw text as fallback
+```
+
+**Files changed:** `processors/__init__.py`
+
+### Tests Added
+
+| File | New Tests | Total |
+|------|-----------|-------|
+| `tests/test_retrieval.py` | **9** — model tracking, index_meta.json persistence, diversity filter | 9 (new file) |
+| `tests/test_downloader.py` | **1** — 4xx fail-fast timing assertion | 7 |
+| **Suite total** | **144 passed**, 1 skipped, 0 failures | — |
+
+---
+
+## Summary of Current State (v2.5)
+
+| Metric | Value |
+|--------|-------|
+| Version | **2.5.0** |
+| Total `.py` files | **34** (added `test_retrieval.py`) |
+| Total lines of code | **~3,100** |
+| Architecture layers | **6** (core, middleware, services, processors, tools, resources) |
+| MCP tools | **13** |
+| MCP resources | **2** |
+| Transport | Streamable HTTP (default), REST (FastAPI), stdio (fallback) |
+| Endpoint | `http://127.0.0.1:8000/mcp` |
+| File upload | `POST /api/upload` → auto-hosted URL (50 MB limit, 10 formats) |
+| Security | Auth + **per-user** rate-limit (60 RPM each, 300 RPM global) + URL/text validation + per-tool timeouts |
+| Error handling | 7-class typed hierarchy, never raises |
+| Logging | Structured JSON to stderr + daily file logs |
+| Caching | 3-layer TTL (download → document → retriever) + **FAISS disk persistence** |
+| FAISS lookup | Memory cache → disk index (auto-selects correct embedding model) → build fresh |
+| Embedding model tracking | `index_meta.json` sidecar records which model built each FAISS index |
+| Concurrency | GPU semaphore (default 2) + FAISS build coalescing + async httpx downloads |
+| Model loading | **Eager** (loaded at startup on both MCP and REST transports) |
+| Workers | Configurable via `--workers N` (default 1) |
+| Retry logic | 3× with exponential back-off on **5xx/timeout only** (4xx fails immediately) |
+| Graceful shutdown | Download cache cleared, httpx client closed, doc/retriever caches kept |
+| Config | 4 frozen dataclasses, 20+ fields, 6 env vars |
+| Entry point | `python -m mcp_server` |
+| Supported formats | PDF, DOCX, PPTX, XLSX, CSV, TXT, HTML, images (OCR) |
+| Test suite | **144 tests**, 9 test files, pytest + pytest-asyncio |

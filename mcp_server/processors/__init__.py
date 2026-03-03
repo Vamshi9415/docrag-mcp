@@ -130,18 +130,12 @@ class TargetedDocumentProcessor:
                 text = file_content.decode("utf-8", errors="replace")
                 if doc_type == "html":
                     try:
-                        from langchain_community.document_loaders import WebBaseLoader
-                        from io import BytesIO
-
-                        loader = WebBaseLoader(file_path)
-                        docs = loader.load()
-                        if docs:
-                            text = "\n\n".join(d.page_content for d in docs)
-                    except Exception:
                         from bs4 import BeautifulSoup
 
                         soup = BeautifulSoup(text, "html.parser")
                         text = soup.get_text(separator="\n", strip=True)
+                    except Exception:
+                        pass  # keep raw text as fallback
             else:
                 text = file_content.decode("utf-8", errors="replace")
 

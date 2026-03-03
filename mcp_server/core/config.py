@@ -19,8 +19,10 @@ load_dotenv()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMP_FILES_PATH = os.path.join(BASE_DIR, "temp_files")
 REQUEST_LOGS_PATH = os.path.join(BASE_DIR, "request_logs")
+FAISS_INDEX_PATH = os.path.join(BASE_DIR, "faiss_indexes")
 os.makedirs(TEMP_FILES_PATH, exist_ok=True)
 os.makedirs(REQUEST_LOGS_PATH, exist_ok=True)
+os.makedirs(FAISS_INDEX_PATH, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Device detection

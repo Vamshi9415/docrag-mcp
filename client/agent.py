@@ -1,13 +1,15 @@
 from __future__ import annotations
 import asyncio
 import os
+import re
 import sys
 
 from dotenv import load_dotenv
 load_dotenv()
 
+import httpx
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 
 # ─────────────────────────────────────────────
@@ -41,6 +43,64 @@ MCP_SERVER_URL = os.getenv(
     "http://127.0.0.1:8000/mcp"
 )
 MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+
+# REST API base URL (derived from MCP URL — same host:port)
+_REST_BASE = re.sub(r"/mcp$", "", MCP_SERVER_URL)
+
+# ─────────────────────────────────────────────
+# File Upload Helper
+# ─────────────────────────────────────────────
+
+# Pattern to detect local file paths in user queries
+# Matches: C:\path\file.pdf, /home/user/file.pdf, ./file.pdf, file.pdf (if it exists)
+_LOCAL_PATH_RE = re.compile(
+    r'(?:[A-Za-z]:\\|\\\\|/|\.{1,2}[/\\])'   # drive letter, UNC, absolute, or relative
+    r'[^\s"\'<>|*?]+'                          # path characters
+    r'\.\w{2,5}\b'                             # extension
+)
+
+
+async def _upload_local_file(file_path: str) -> str | None:
+    """Upload a local file to the server's /api/upload endpoint.
+
+    Returns the server-hosted document_url, or None on failure.
+    """
+    file_path = file_path.strip().strip('"').strip("'")
+    if not os.path.isfile(file_path):
+        return None
+
+    headers = {"x-api-key": MCP_API_KEY} if MCP_API_KEY else {}
+    upload_url = f"{_REST_BASE}/api/upload"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            with open(file_path, "rb") as f:
+                filename = os.path.basename(file_path)
+                resp = await client.post(
+                    upload_url,
+                    files={"file": (filename, f)},
+                    headers=headers,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            doc_url = data["document_url"]
+            print(f"  [UPLOAD] {filename} → {doc_url}")
+            return doc_url
+    except Exception as exc:
+        print(f"  [UPLOAD FAILED] {file_path}: {exc}")
+        return None
+
+
+async def _resolve_local_paths(query: str) -> str:
+    """Find local file paths in the query and replace them with server URLs."""
+    matches = _LOCAL_PATH_RE.findall(query)
+    for match in matches:
+        clean = match.strip().strip('"').strip("'")
+        if os.path.isfile(clean):
+            url = await _upload_local_file(clean)
+            if url:
+                query = query.replace(match, url)
+    return query
 
 SYSTEM_PROMPT = """You are a document analysis assistant. You MUST use tools to answer questions.
 
@@ -96,13 +156,16 @@ async def initialize_agent():
     print(f"\nConnected to MCP server: {MCP_SERVER_URL}")
     print(f"Loaded tools: {[t.name for t in tools]}\n")
 
-    agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
+    agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
 
 
 # ─────────────────────────────────────────────
 # Run Query
 # ─────────────────────────────────────────────
 async def run_query(query: str):
+
+    # Auto-detect local file paths and upload them to the server
+    query = await _resolve_local_paths(query)
 
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": query}]}

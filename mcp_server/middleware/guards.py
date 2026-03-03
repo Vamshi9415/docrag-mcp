@@ -34,7 +34,7 @@ def check_auth() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Rate Limiting — token-bucket algorithm
+# Rate Limiting — per-user token-bucket algorithm
 # ═══════════════════════════════════════════════════════════════════
 
 class _TokenBucket:
@@ -61,15 +61,70 @@ class _TokenBucket:
             return False
 
 
-_global_bucket = _TokenBucket(security_config.rate_limit_rpm)
+# Per-user buckets keyed by API key (or "anonymous" when auth is off).
+# A global bucket is kept as a fallback / total-server cap.
+_user_buckets: dict[str, _TokenBucket] = {}
+_user_buckets_lock = threading.Lock()
+_global_bucket = _TokenBucket(security_config.rate_limit_rpm * 5)  # 5× headroom
+
+# Maximum number of tracked users to prevent memory leak from key enumeration
+_MAX_USER_BUCKETS = 1000
 
 
-def check_rate_limit(tool_name: str = "") -> None:
-    """Consume one token from the global bucket; raise on exhaustion."""
-    if not _global_bucket.consume():
+def _get_user_bucket(api_key: str) -> _TokenBucket:
+    """Return (or create) a per-user token bucket."""
+    with _user_buckets_lock:
+        bucket = _user_buckets.get(api_key)
+        if bucket is not None:
+            return bucket
+        # Evict oldest bucket if at capacity (simple FIFO eviction)
+        if len(_user_buckets) >= _MAX_USER_BUCKETS:
+            oldest_key = next(iter(_user_buckets))
+            del _user_buckets[oldest_key]
+        bucket = _TokenBucket(security_config.rate_limit_rpm)
+        _user_buckets[api_key] = bucket
+        return bucket
+
+
+def check_rate_limit(tool_name: str = "", api_key: str = "") -> None:
+    """Consume one token from the per-user and global buckets.
+
+    Rate-limits are enforced at **two levels**:
+    - **Per-user**: Each API key (or "anonymous") gets its own bucket at
+      ``rate_limit_rpm`` requests per minute.
+    - **Global**: A server-wide bucket at 5× the per-user rate prevents
+      the total load from exceeding hardware capacity.
+
+    Parameters
+    ----------
+    tool_name:
+        Name of the tool being invoked (for logging).
+    api_key:
+        The caller's API key.  When empty, defaults to ``"anonymous"``.
+    """
+    user_key = api_key or "anonymous"
+    user_bucket = _get_user_bucket(user_key)
+
+    if not user_bucket.consume():
+        logger.warning(
+            "rate_limit.per_user",
+            extra={"detail": f"user={user_key[:8]}… exceeded {security_config.rate_limit_rpm} rpm"},
+        )
         raise RateLimitError(
             f"Rate limit exceeded ({security_config.rate_limit_rpm} req/min). "
             f"Try again shortly."
+        )
+
+    if not _global_bucket.consume():
+        # Refund the user token since the request won't proceed
+        with user_bucket._lock:
+            user_bucket.tokens = min(user_bucket.capacity, user_bucket.tokens + 1.0)
+        logger.warning(
+            "rate_limit.global",
+            extra={"detail": "global server rate limit exceeded"},
+        )
+        raise RateLimitError(
+            "Server is under heavy load. Try again shortly."
         )
 
 

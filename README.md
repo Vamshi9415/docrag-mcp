@@ -257,8 +257,9 @@ The server uses `.env` for configuration. The only **required** setting is
 ```bash
 # .env (copy from .env.example and customise)
 MCP_API_KEY=vamshibachumcpserver      # authenticate all requests
-# MCP_RATE_LIMIT_RPM=60               # requests per minute (default: 60)
+# MCP_RATE_LIMIT_RPM=60               # requests per minute per user (default: 60)
 # MCP_REQUEST_TIMEOUT=300             # seconds per tool call (default: 300)
+# GPU_CONCURRENCY=2                   # max concurrent FAISS build/retrieval ops (default: 2)
 ```
 
 > **Note:** No `GOOGLE_API_KEY` is needed for the server — it contains no LLM.
@@ -275,6 +276,11 @@ python -m mcp_server --transport rest --host 0.0.0.0 --port 9000
 python -m mcp_server                                     # streamable-http, localhost:8000
 python -m mcp_server --transport stdio                   # stdio (piped)
 
+# ── Production (multi-worker for concurrent users) ────────────────
+python -m mcp_server --workers 4                         # 4 worker processes
+python -m mcp_server --transport rest --workers 4         # REST with 4 workers
+python -m mcp_server --workers 4 --host 0.0.0.0          # expose to network
+
 # ── Development mode (auto-reload on code changes) ────────────────
 python -m mcp_server --reload                            # watches mcp_server/ for changes
 ```
@@ -284,7 +290,12 @@ python -m mcp_server --reload                            # watches mcp_server/ f
 | `--transport`   | `streamable-http`, `stdio`, `rest`      | `streamable-http`    |
 | `--host`        | Any bind address                        | `127.0.0.1`          |
 | `--port`        | Any port number                         | `8000`               |
+| `--workers`     | Number of uvicorn worker processes      | `1`                  |
 | `--reload`      | Flag (no value)                         | Off                  |
+
+> **Note:** `--reload` and `--workers > 1` are mutually exclusive (uvicorn limitation).
+> In `--reload` mode, workers is always forced to 1. Each worker loads its own copy
+> of ML models (~1.5 GB), so ensure sufficient GPU/RAM when scaling workers.
 
 ### 4. Verify
 
@@ -333,6 +344,59 @@ python agent.py "Summarise https://example.com/report.pdf"  # one-shot
 See [`client/README.md`](client/README.md) for full details on the agent
 architecture, LLM selection, environment variables, and example conversations.
 
+### End-to-End Example: Querying a Spreadsheet via MCP Agent
+
+This walkthrough shows the full flow — hosting a file, starting the MCP server,
+and querying it through the LangChain agent.
+
+**Step 1 — Serve your documents locally** (separate terminal):
+
+```bash
+cd docs/                           # folder containing your files
+python -m http.server 9090         # serves files at http://localhost:9090/
+```
+
+**Step 2 — Start the MCP server** (separate terminal):
+
+```bash
+python -m mcp_server               # streamable-http on http://127.0.0.1:8000
+```
+
+**Step 3 — Run the agent** (separate terminal):
+
+```bash
+cd client
+python agent.py
+```
+
+**Step 4 — Chat with your data:**
+
+```
+LangChain MCP Agent
+Type 'quit' to exit
+
+> get the phone number of John Doe from http://localhost:9090/Student_Data.xlsx
+  [TOOL CALL] query_spreadsheet(search_value='John Doe', document_url='http://localhost:9090/Student_Data.xlsx')
+  [TOOL RESULT] query_spreadsheet → [{'type': 'text', 'text': '{\n  "matches": [\n    {\n      "NAME": "John Doe",\n      "PHONE NUMBER": "9876543210",\n      "EMAIL ID": "johndoe@example.com",\n    ...
+
+ The phone number for John Doe is 9876543210.
+
+> summarise https://example.com/quarterly-report.pdf
+  [TOOL CALL] process_document(document_url='https://example.com/quarterly-report.pdf')
+  ...
+
+ The report covers Q3 revenue growth of 12% ...
+```
+
+The agent automatically selects the right MCP tool (`query_spreadsheet`
+for row lookups, `retrieve_chunks` for semantic search, `extract_*` for
+raw extraction, etc.) based on your natural-language query.
+
+> **Tip:** You can also pass a one-shot query directly:
+> ```bash
+> python agent.py "Find email of Jane Smith from http://localhost:9090/Student_Data.xlsx"
+> ```
+
 ---
 
 ## REST API Reference
@@ -346,7 +410,7 @@ are available at `http://127.0.0.1:8000/docs`.
 
 1. **Request ID** — `uuid4().hex[:12]` generated and returned as `X-Request-Id` header
 2. **API Key** — checked via `x-api-key` header → HTTP 401 on mismatch
-3. **Rate Limit** — token-bucket → HTTP 429 when exhausted
+3. **Rate Limit** — per-user + global token-bucket → HTTP 429 when exhausted
 
 ### Document Endpoints
 
@@ -372,6 +436,7 @@ are available at `http://127.0.0.1:8000/docs`.
 
 | Method | Endpoint | Request Body | Description |
 |--------|----------|--------------|-------------|
+| `POST` | `/api/upload` | `multipart/form-data` (field: `file`) | Upload a local file, get a server-hosted URL |
 | `POST` | `/api/detect-language` | `{"text": "..."}` | Multi-round language detection |
 | `GET`  | `/api/health` | — | System health, models, capabilities |
 | `POST` | `/api/cache` | `{"action": "stats"\|"clear"}` | Cache stats or clear |
@@ -421,6 +486,16 @@ curl http://127.0.0.1:8000/api/health
 curl -X POST http://127.0.0.1:8000/api/retrieve-chunks \
   -H "Content-Type: application/json" \
   -d '{"document_url":"https://example.com/report.pdf","query":"key findings","top_k":5}'
+
+# Upload a local file and get a server-hosted URL
+curl -X POST http://127.0.0.1:8000/api/upload \
+  -F "file=@/path/to/report.pdf"
+# Response: {"document_url": "http://127.0.0.1:8000/uploads/a1b2c3_report.pdf", ...}
+
+# Then use the returned URL with any tool
+curl -X POST http://127.0.0.1:8000/api/retrieve-chunks \
+  -H "Content-Type: application/json" \
+  -d '{"document_url":"http://127.0.0.1:8000/uploads/a1b2c3_report.pdf","query":"key findings"}'
 ```
 
 ### Authentication (REST)
@@ -550,13 +625,14 @@ On error (tools never raise — all exceptions are caught):
 │
 ├── mcp_server/                  # ─── Server package ───
 │   ├── __init__.py
-│   ├── __main__.py              # CLI: --transport rest|streamable-http|stdio --reload
+│   ├── __main__.py              # CLI: --transport rest|streamable-http|stdio --reload --workers N
 │   ├── server.py                # FastMCP instance, lifespan, tool registration
 │   ├── api.py                   # FastAPI REST wrapper (plain JSON endpoints)
 │   ├── _asgi.py                 # ASGI factory for --reload mode (uvicorn)
 │   │
 │   ├── core/
 │   │   ├── config.py            # Frozen dataclass configs, feature flags, device detection
+│   │   ├── concurrency.py       # GPU semaphore, FAISS build coalescing, dedicated thread pool
 │   │   ├── logging.py           # Structured JSON logging to stderr, request-id ContextVar
 │   │   ├── errors.py            # Exception hierarchy (6 error types)
 │   │   ├── schemas.py           # ProcessedDocument, ExtractedTable, ExtractedImage, ExtractedURL
@@ -564,11 +640,11 @@ On error (tools never raise — all exceptions are caught):
 │   │
 │   ├── middleware/
 │   │   ├── __init__.py          # @guarded() decorator — full middleware chain
-│   │   └── guards.py            # Auth, token-bucket rate-limit, URL/text validation
+│   │   └── guards.py            # Auth, per-user + global rate-limit, URL/text validation
 │   │
 │   ├── services/
 │   │   ├── cache.py             # Generic _TTLCache, 3 singleton layers
-│   │   ├── downloader.py        # HTTP download with 3× retry + backoff
+│   │   ├── downloader.py        # Async httpx downloads with connection pooling + 3× retry
 │   │   ├── language.py          # Multi-round majority-vote language detection
 │   │   ├── chunking.py          # Adaptive chunking strategy + importance scoring
 │   │   └── retrieval.py         # FAISS vector search + cross-encoder reranking + diversity filter
@@ -590,7 +666,8 @@ On error (tools never raise — all exceptions are caught):
 │   ├── resources/
 │   │   └── __init__.py          # rag://supported-formats, rag://tool-descriptions
 │   │
-│   ├── temp_files/              # Auto-created — temporary download / OCR staging
+│   ├── temp_files/              # Auto-created — temporary download / OCR staging + file uploads
+│   ├── faiss_indexes/           # Auto-created — persisted FAISS indexes (survives restarts)
 │   └── request_logs/            # Auto-created — structured request logs
 │
 └── client/                      # ─── Separate agent (has LLM) ───
@@ -702,11 +779,13 @@ Request → [1] Request ID → [2] Auth → [3] Rate Limit → [4] Execute w/ Ti
      for defence-in-depth; raises `AuthenticationError` if auth is enabled but
      the key is empty.
 
-3. **Rate Limiting** (`check_rate_limit(tool_name)`) — token-bucket algorithm:
-   - Capacity = `rate_limit_rpm` (default 60)
+3. **Rate Limiting** (`check_rate_limit(tool_name, api_key)`) — two-tier token-bucket:
+   - **Per-user bucket**: Capacity = `rate_limit_rpm` (default 60) per API key
+   - **Global bucket**: 5× per-user rate (default 300 rpm) — server-wide safety cap
    - Refill rate = `rpm / 60.0` tokens per second
    - Lazy refill: tokens refill on each `consume()` call (no background thread)
-   - Raises `RateLimitError` when tokens exhausted
+   - Per-user buckets are evicted FIFO at 1000 entries to prevent memory leaks
+   - Raises `RateLimitError` when per-user or global tokens exhausted
 
 4. **Execution with Timeout** — `asyncio.wait_for(fn(...), timeout=...)`:
    - Document tools: 300 s
@@ -772,9 +851,13 @@ On every `put()` call, the following eviction sequence runs:
 |----------|---------|
 | `get_cached_download(url)` / `put_cached_download(url, data)` | Download layer |
 | `get_cached_document(key)` / `put_cached_document(key, doc)` | Document layer |
-| `get_cached_retriever(key)` / `put_cached_retriever(key, ret)` | Retriever layer |
-| `clear_all()` | Flush all layers |
-| `cache_stats()` | Per-layer hit count, miss count, hit rate %, entry count |
+| `get_cached_retriever(key)` / `put_cached_retriever(key, ret)` | Retriever memory layer |
+| `get_retriever_with_disk_fallback(hash, emb)` | Memory → disk → None lookup |
+| `put_retriever_with_disk(hash, ret)` | Save to memory + persist to disk |
+| `clear_faiss_disk()` | Delete all persisted FAISS indexes |
+| `faiss_disk_stats()` | Count & size of on-disk indexes |
+| `clear_all()` | Flush all layers (memory + disk) |
+| `cache_stats()` | Per-layer hit/miss rates + disk stats |
 
 ---
 
@@ -913,19 +996,29 @@ The underlying splitter is LangChain's `RecursiveCharacterTextSplitter`.
 ## Retrieval Engine
 
 The retrieval service (`services/retrieval.py`) implements `EnhancedRetriever` —
-an on-the-fly FAISS vector search engine with cross-encoder reranking and
-diversity filtering.
+an on-the-fly FAISS vector search engine with cross-encoder reranking,
+diversity filtering, **disk persistence**, and **concurrency controls**.
 
 ### Pipeline Steps
 
 ```
-Chunks → Embedding → FAISS Index → Similarity Search (3× over-retrieval)
+Chunks → Embedding → FAISS Index → Save to disk → Similarity Search (3× over-retrieval)
     → Cross-Encoder Reranking → Diversity Filter → top_k results
 ```
 
 1. **Index Construction** — `FAISS.from_documents(chunks, embeddings)` from
-   `langchain_community.vectorstores`. Built on every new document (cached
-   in the retriever cache layer for subsequent queries).
+   `langchain_community.vectorstores`. Built on every new document, then
+   **persisted to `faiss_indexes/<url_hash>/`** and cached in memory.
+   On subsequent queries (even after restart), the index is loaded from disk
+   via `FAISS.load_local()` instead of being rebuilt.
+
+   **Concurrency controls** (from `core/concurrency.py`):
+   - **GPU Semaphore** — FAISS build and retrieval run via `run_in_gpu_pool()`,
+     limited to `GPU_CONCURRENCY` (default 2) simultaneous operations. Prevents
+     OOM under burst traffic.
+   - **Build Coalescing** — If 10 requests arrive for the same URL, only ONE
+     builds the index; the other 9 wait on a per-URL `asyncio.Lock`, then read
+     from cache. Eliminates redundant embedding work.
 
 2. **Embedding Model Selection:**
    - ≤ 50 chunks → `get_embeddings_fast()` (MiniLM-L6-v2) — cross-encoder reranking compensates
@@ -1112,8 +1205,9 @@ Gujarati, Punjabi, Urdu, Chinese, Japanese (18 languages).
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `MCP_API_KEY` | **Yes** | `vamshibachumcpserver` | Authenticates all MCP and REST requests via `x-api-key` header |
-| `MCP_RATE_LIMIT_RPM` | No | `60` | Global rate limit (requests/minute) |
+| `MCP_RATE_LIMIT_RPM` | No | `60` | Per-user rate limit (requests/minute); global cap is 5× this value |
 | `MCP_REQUEST_TIMEOUT` | No | `300` | Default tool timeout in seconds |
+| `GPU_CONCURRENCY` | No | `2` | Max concurrent FAISS build/retrieval operations (GPU semaphore) |
 | `HUGGINGFACE_TOKEN` | No | — | HuggingFace model access (for gated models) |
 
 > `GOOGLE_API_KEY` / `OPENAI_API_KEY` are **only** needed in the

@@ -1,0 +1,175 @@
+% Resume — Vamshi Bachu
+%------------------------
+
+\documentclass[letterpaper,10.8pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\usepackage{fontawesome5}
+\usepackage{multicol}
+\usepackage{xcolor}
+\setlength{\multicolsep}{-3.0pt}
+\setlength{\columnsep}{-1pt}
+\input{glyphtounicode}
+
+%----------COLOR THEME----------
+\definecolor{accent}{HTML}{1F3D73}
+\definecolor{subtle}{HTML}{444444}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Margins
+\addtolength{\oddsidemargin}{-0.55in}
+\addtolength{\evensidemargin}{-0.55in}
+\addtolength{\textwidth}{1.1in}
+\addtolength{\topmargin}{-.7in}
+\addtolength{\textheight}{1.4in}
+
+\urlstyle{same}
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+\setlength{\footskip}{4.08003pt}
+
+% Section formatting
+\titleformat{\section}{
+  \vspace{-5pt}\scshape\raggedright\large\bfseries\color{accent}
+}{}{0em}{}[\color{accent}\titlerule \vspace{-6pt}]
+
+\pdfgentounicode=1
+
+%-------------------------
+% Custom commands
+\newcommand{\resumeItem}[1]{
+  \item\small{#1 \vspace{-1pt}}
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{1.0\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{\color{accent}#1} & \textbf{\small #2} \\
+      \textit{\small\color{subtle}#3} & \textit{\small\color{subtle}#4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & \textbf{\small #2}\\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubItem}[1]{\resumeItem{#1}\vspace{-4pt}}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\tiny$\bullet$}}$}
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.0in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}\vspace{-5pt}}
+\newcommand{\resumeItemListStart}{\begin{itemize}[itemsep=1pt, topsep=0pt, leftmargin=0.15in]}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    {\Huge\scshape\color{accent}Vamshi Bachu} \\ \vspace{4pt}
+    \small
+    \raisebox{-0.1\height}\faPhone\ 8309245040 \enspace$|$\enspace
+    \href{mailto:vamshibachu23@gmail.com}{\raisebox{-0.2\height}\faEnvelope\ \underline{vamshibachu23@gmail.com}} \enspace$|$\enspace
+    \href{https://linkedin.com/in/vamshi-bachu-18a706256/}{\raisebox{-0.2\height}\faLinkedin\ \underline{linkedin}} \enspace$|$\enspace
+    \href{https://github.com/Vamshi9415}{\raisebox{-0.2\height}\faGithub\ \underline{github}}
+    \vspace{-8pt}
+\end{center}
+
+%-----------EDUCATION-----------
+\section{Education}
+\resumeSubHeadingListStart
+\resumeSubheading
+  {University of Hyderabad}{2021 -- 2026}
+  {I.MTech (Computer Science)}{Hyderabad, Telangana}
+\resumeSubHeadingListEnd
+\vspace{-4pt}
+\small\textbf{Coursework:} Data Structures, Software Engg., Machine Learning, DBMS, Deep Learning, Neural Networks, Network Programming
+\vspace{-4pt}
+
+%-----------TECHNICAL SKILLS-----------
+\section{Technical Skills}
+\begin{itemize}[leftmargin=0.15in, label={}, itemsep=-2pt]
+  \small\item \textbf{Languages:} Python, Java, C, SQL
+  \small\item \textbf{AI \& GenAI:} LLMs, \textbf{RAG}, \textbf{LangChain}, Transformers, Prompt Engg., Ollama, PyTorch
+  \small\item \textbf{Web \& Cloud:} Flask, FastAPI, GCP, Linux, Git, Selenium, Streamlit, HTML/CSS, JS
+  \small\item \textbf{Databases:} MySQL, MongoDB, FAISS (Vector DB)
+\end{itemize}
+\vspace{-12pt}
+
+%-----------EXPERIENCE-----------
+\section{Experience}
+\resumeSubHeadingListStart
+\resumeSubheading
+  {C.R.Rao Institute (AIMSCS)}{May 2024 -- July 2024}
+  {Intern}{Hyderabad, Telangana}
+\resumeItemListStart
+  \resumeItem{\textbf{Graph-Based Document Conversion}: Built knowledge graphs by extracting Indian-specific entities with a fine-tuned \textbf{BERT NER model}.}
+  \resumeItem{\textbf{Search \& Visualization}: Dynamic search with Flask \& MongoDB; integrated Pyvis for interactive network graph visualization.}
+  \resumeItem{\textbf{Testing \& Optimization}: Load-tested with JMeter, identified a memory leak in embedded graphs, validated UI with Selenium.}
+\resumeItemListEnd
+\resumeSubHeadingListEnd
+
+%-----------PROJECTS-----------
+\section{Projects}
+\resumeSubHeadingListStart
+
+\resumeProjectHeading
+  {\textbf{\color{accent}DocRAG-MCP} $|$ \emph{Python, FastAPI, FAISS, LangChain, LangGraph}} {}
+\resumeItemListStart
+  \resumeItem{Built a \textbf{production MCP server} (4,600+ LoC) with \textbf{6-layer architecture}, \textbf{3 transports} (HTTP, stdio, REST), and \textbf{9 doc formats} incl.\ OCR; composable \textbf{middleware} for auth, \textbf{rate limiting}, SSRF protection, and JSON logging.}
+  \resumeItem{Designed \textbf{3-layer TTL cache} with FAISS disk persistence, cutting repeat-query latency from \textbf{15s to 2s} (\textbf{7.5x}); GPU-semaphore concurrency, async lock coalescing, and connection pooling with backoff retries.}
+  \resumeItem{\textbf{Hybrid retrieval} with dual embeddings + \textbf{cross-encoder re-ranking}; shipped \textbf{LangGraph ReAct agent} with LLM-agnostic orchestration; \textbf{144 tests, 100\% pass rate}.}
+\resumeItemListEnd
+
+\resumeProjectHeading
+  {\textbf{\color{accent}Student Database Management System} $|$ \emph{C, Pthreads, TCP Sockets, IPC}} {}
+\resumeItemListStart
+  \resumeItem{Developed a multithreaded TCP socket server in C using Pthreads with a doubly linked list for student record management, enabling concurrent client request handling.}
+\resumeItemListEnd
+
+\resumeSubHeadingListEnd
+
+%-----------RESEARCH-----------
+\section{Research Experience}
+\resumeSubHeadingListStart
+
+\resumeProjectHeading
+  {\textbf{\color{accent}Ensemble Smells with Explainable AI}} {}
+\resumeItemListStart
+  \resumeItem{Architected a hybrid \textbf{Deep Attention Network} fusing semantic code embeddings with structural metrics via \textbf{Gated Fusion Attention} to capture long-range dependencies in large codebases.}
+  \resumeItem{Achieved \textbf{SOTA} on long-method detection (\textbf{MLCQ benchmark}), surpassing prior work by \textbf{4.3\% F1}; validated with Stratified 5-Fold CV; added Explainable AI layer via attention weights.}
+\resumeItemListEnd
+
+\resumeSubHeadingListEnd
+
+%-----------ACHIEVEMENTS-----------
+\section{Achievements \& Extracurricular}
+\resumeItemListStart
+  \resumeItem{\textbf{Hackathon Finalist} -- Reached finals at Bajaj Hackrx 6.0 (National-Level hackathon)}
+  \resumeItem{Led as an organizer of CIS freshers'23 at University of Hyderabad -- May 2023}
+  \resumeItem{Secured \textbf{1520 rank} in TS-EAMCET and \textbf{98.4 percentile} in JEE-Mains}
+  \resumeItem{Gained \textbf{11K+ followers} on meme page}
+\resumeItemListEnd
+
+\end{document}

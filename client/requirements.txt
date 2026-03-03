@@ -10,4 +10,5 @@
 langchain
 langchain-google-genai
 langchain-mcp-adapters
+httpx                    # async file upload to server
 python-dotenv

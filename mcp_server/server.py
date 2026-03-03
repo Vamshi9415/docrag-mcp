@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 
 from mcp_server.core.logging import setup_logging, get_logger
-from mcp_server.services.cache import clear_all as _clear_all_caches
 
 # ── Logging bootstrap ─────────────────────────────────────────────
 setup_logging()
@@ -24,10 +23,16 @@ logger = get_logger("server")
 
 @asynccontextmanager
 async def _lifespan(server: FastMCP):
-    """Server startup and graceful shutdown."""
-    logger.info("server.startup", extra={"version": "2.0.0"})
+    """MCP session startup and teardown.
 
-    # ── Eagerly load embedding + reranker models at startup ───────
+    NOTE: With streamable-http transport, this runs **per session** (not
+    once per process).  We must NOT clear caches or close the shared
+    httpx client here — those are process-level resources shared across
+    all sessions.  The TTL already handles cache expiry.
+    """
+    logger.info("session.start — MCP session opened")
+
+    # ── Eagerly load embedding + reranker models (idempotent) ─────
     import asyncio
     loop = asyncio.get_running_loop()
     from mcp_server.core.models import _ensure_models_loaded
@@ -36,12 +41,10 @@ async def _lifespan(server: FastMCP):
     logger.info("server.models.ready — all models loaded and ready")
 
     yield
-    logger.info("server.shutdown — flushing download cache (keeping doc/retriever cache)")
-    # Only clear the download layer; keep document & retriever caches
-    # so restart/reconnect stays fast.
-    from mcp_server.services.cache import download_cache
-    download_cache.clear()
-    logger.info("server.shutdown.complete")
+    # Session closed — nothing to clean up.
+    # Download, document, and retriever caches are kept alive across
+    # sessions so the next query on the same file is instant.
+    logger.info("session.end — MCP session closed (caches preserved)")
 
 
 # ── FastMCP instance (default host/port; overridden by create_server) ──

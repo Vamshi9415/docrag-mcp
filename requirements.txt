@@ -29,6 +29,7 @@ pytesseract
 # ── Web / HTML ───────────────────────────────────────────────────
 beautifulsoup4
 requests
+httpx              # async HTTP client (replaces sync requests in downloader)
 
 # ── Language detection ───────────────────────────────────────────
 langdetect

@@ -37,6 +37,10 @@ mcp_server/request_logs/
 temp_files/
 mcp_server/temp_files/
 
+# ── FAISS persisted indexes ───────────────────────────────────────
+faiss_indexes/
+mcp_server/faiss_indexes/
+
 # ── Testing / coverage ───────────────────────────────────────────
 .pytest_cache/
 htmlcov/

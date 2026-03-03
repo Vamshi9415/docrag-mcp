@@ -33,22 +33,37 @@ def main() -> None:
         action="store_true",
         help="Auto-reload server when code changes (dev mode)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of uvicorn worker processes (default: 1, recommended: 4 for production)",
+    )
     args = parser.parse_args()
 
     if args.transport == "rest":
         # ── Plain REST API (FastAPI + Uvicorn) ────────────────────
         import uvicorn
-        from mcp_server.api import create_rest_app
 
-        app = create_rest_app()
+        workers = args.workers if not args.reload else 1
         print(f"\n  RAG Document Server — REST API")
         print(f"  Listening on http://{args.host}:{args.port}")
+        if workers > 1:
+            print(f"  Workers: {workers}")
         print(f"  Swagger docs: http://{args.host}:{args.port}/docs\n")
-        uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
+        uvicorn.run(
+            "mcp_server.api:create_rest_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+            workers=workers,
+        )
     else:
         # ── MCP transport (streamable-http or stdio) ──────────────
         if args.reload:
             # Use uvicorn with reload to serve the MCP ASGI app
+            # NOTE: --reload and --workers>1 are mutually exclusive in uvicorn
             import uvicorn
             print(f"\n  RAG Document Server — MCP (streamable-http) [DEV MODE — auto-reload]")
             print(f"  Listening on http://{args.host}:{args.port}\n")
@@ -66,25 +81,27 @@ def main() -> None:
                     "temp_files",
                 ],
             )
+        elif args.transport == "streamable-http":
+            import uvicorn
+
+            workers = args.workers
+            print(f"\n  RAG Document Server \u2014 MCP (streamable-http)")
+            print(f"  Listening on  http://{args.host}:{args.port}")
+            print(f"  MCP endpoint: http://{args.host}:{args.port}/mcp")
+            if workers > 1:
+                print(f"  Workers: {workers}")
+            print(f"  Auth: {'enabled (x-api-key required)' if __import__('os').getenv('MCP_API_KEY') else 'disabled (set MCP_API_KEY to enable)'}\n")
+            uvicorn.run(
+                "mcp_server._asgi:create_app",
+                factory=True,
+                host=args.host,
+                port=args.port,
+                workers=workers,
+            )
         else:
             from mcp_server.server import create_server
-            from mcp_server.middleware.guards import AuthMiddleware, MCPRouter
-
             mcp = create_server(host=args.host, port=args.port)
-
-            if args.transport == "streamable-http":
-                # Build the ASGI app, add GET routes, then wrap with auth.
-                # Stack: AuthMiddleware -> MCPRouter -> FastMCP
-                import uvicorn
-
-                asgi_app = AuthMiddleware(MCPRouter(mcp.streamable_http_app()))
-                print(f"\n  RAG Document Server \u2014 MCP (streamable-http)")
-                print(f"  Listening on  http://{args.host}:{args.port}")
-                print(f"  MCP endpoint: http://{args.host}:{args.port}/mcp")
-                print(f"  Auth: {'enabled (x-api-key required)' if __import__('os').getenv('MCP_API_KEY') else 'disabled (set MCP_API_KEY to enable)'}\n")
-                uvicorn.run(asgi_app, host=args.host, port=args.port)
-            else:
-                mcp.run(transport="stdio")
+            mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

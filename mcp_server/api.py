@@ -13,38 +13,58 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from mcp_server.core.config import (
     RERANK_AVAILABLE, OCR_AVAILABLE, LANG_DETECT_AVAILABLE,
-    DEVICE, server_config, security_config,
+    DEVICE, server_config, security_config, TEMP_FILES_PATH,
 )
 from mcp_server.core.errors import MCPServerError
 from mcp_server.core.logging import setup_logging, get_logger, request_id_var
-from mcp_server.core.models import models_loaded, get_embeddings_fast, get_embeddings_accurate
+from mcp_server.core.models import models_loaded, get_embeddings_fast, get_embeddings_accurate, _ensure_models_loaded
 from mcp_server.middleware.guards import (
     check_rate_limit, validate_url, validate_text,
 )
 from mcp_server.services.cache import (
     clear_all as clear_cache, cache_stats,
     get_cached_document, put_cached_document,
-    get_cached_retriever, put_cached_retriever,
+    get_retriever_with_disk_fallback, put_retriever_with_disk,
 )
-from mcp_server.services.downloader import download
+from mcp_server.services.downloader import download, close_client
 from mcp_server.services.language import detect_language_robust, get_language_name
 from mcp_server.services.chunking import AdaptiveChunkingStrategy
 from mcp_server.services.retrieval import EnhancedRetriever
+from mcp_server.core.concurrency import run_in_gpu_pool, coalesced_build
 from mcp_server.processors import detect_document_type, TargetedDocumentProcessor
 
 setup_logging()
 logger = get_logger("api")
+
+
+# ── Lifespan — startup / shutdown hooks ───────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pre-load ML models on startup; close httpx client on shutdown."""
+    logger.info("api.startup — pre-loading ML models")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _ensure_models_loaded)
+    logger.info("api.startup — models ready")
+    yield
+    logger.info("api.shutdown — closing httpx client")
+    await close_client()
+    logger.info("api.shutdown — done")
+
 
 # ── FastAPI app ───────────────────────────────────────────────────
 
@@ -56,6 +76,7 @@ app = FastAPI(
         "and vector retrieval. No LLM inside — bring your own agent. "
         "Supports PDF, DOCX, PPTX, XLSX, CSV, TXT, HTML, and image (OCR)."
     ),
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -65,6 +86,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Serve uploaded files as static assets ─────────────────────────
+_UPLOADS_DIR = os.path.join(TEMP_FILES_PATH, "uploads")
+os.makedirs(_UPLOADS_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_UPLOADS_DIR), name="uploads")
+
 
 # ── Middleware: auth, rate-limit, request-id ────────────────────
 
@@ -73,15 +99,15 @@ async def guard_middleware(request: Request, call_next):
     rid = uuid.uuid4().hex[:12]
     token = request_id_var.set(rid)
     try:
+        api_key = request.headers.get("x-api-key", "")
         if security_config.auth_enabled:
-            api_key = request.headers.get("x-api-key", "")
             if api_key != security_config.api_key:
                 return JSONResponse(
                     status_code=401,
                     content={"error": "Invalid or missing API key", "code": "AUTH_ERROR"},
                 )
         try:
-            check_rate_limit(request.url.path)
+            check_rate_limit(request.url.path, api_key=api_key)
         except MCPServerError as exc:
             return JSONResponse(
                 status_code=429,
@@ -214,26 +240,33 @@ async def api_retrieve_chunks(body: RetrieveChunksRequest) -> dict[str, Any]:
     if not processed.content.strip():
         return {"results": [], "total_chunks_indexed": 0}
 
-    retriever = get_cached_retriever(url_hash)
+    # Disk loading auto-selects the correct embedding model from saved metadata.
+    retriever, source = get_retriever_with_disk_fallback(url_hash)
     if retriever is None:
-        doc_type = detect_document_type(body.document_url)
-        chunks = AdaptiveChunkingStrategy.create_chunks(processed.content, doc_type)
-        if not chunks:
+        # Coalesced build — only one coroutine builds per url_hash
+        async def _build_index():
+            # Re-check cache (another coroutine may have finished)
+            ret, src = get_retriever_with_disk_fallback(url_hash)
+            if ret is not None:
+                return ret, len(ret.chunks)
+
+            doc_type = detect_document_type(body.document_url)
+            chunks = AdaptiveChunkingStrategy.create_chunks(processed.content, doc_type)
+            if not chunks:
+                return None, 0
+            emb_model = "fast" if len(chunks) <= 50 else "accurate"
+            emb = get_embeddings_fast() if len(chunks) <= 50 else get_embeddings_accurate()
+            ret = await run_in_gpu_pool(EnhancedRetriever, emb, chunks, emb_model)
+            put_retriever_with_disk(url_hash, ret)
+            return ret, len(chunks)
+
+        retriever, total_chunks = await coalesced_build(url_hash, _build_index)
+        if retriever is None:
             return {"results": [], "total_chunks_indexed": 0}
-        embeddings = get_embeddings_accurate() if len(chunks) < 100 else get_embeddings_fast()
-        loop = asyncio.get_running_loop()
-        retriever = await loop.run_in_executor(
-            None, lambda: EnhancedRetriever(embeddings, chunks)
-        )
-        put_cached_retriever(url_hash, retriever)
-        total_chunks = len(chunks)
     else:
         total_chunks = len(retriever.chunks)
 
-    loop = asyncio.get_running_loop()
-    results = await loop.run_in_executor(
-        None, lambda: retriever.retrieve(body.query, top_k=body.top_k)
-    )
+    results = await run_in_gpu_pool(retriever.retrieve, body.query, body.top_k)
 
     return {
         "results": [
@@ -396,6 +429,81 @@ async def api_cache(body: ManageCacheRequest) -> dict[str, Any]:
     return {"action": "stats", **cache_stats()}
 
 
+# ═════════════════════════════════════════════════════════════════
+#  File Upload endpoint
+# ═════════════════════════════════════════════════════════════════
+
+# Allowed extensions for upload (matches server's supported formats)
+_ALLOWED_EXTENSIONS = {
+    ".pdf", ".docx", ".pptx", ".xlsx", ".csv",
+    ".txt", ".html", ".htm",
+    ".png", ".jpg", ".jpeg",
+}
+
+
+@app.post("/api/upload", tags=["Utility"])
+async def api_upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Upload a local file and receive a server-hosted URL.
+
+    This solves the **local file problem**: every tool on this server requires
+    a public HTTP URL, but users often have files on their local machine with
+    no HTTP server.  This endpoint accepts ``multipart/form-data``, saves the
+    file to ``temp_files/uploads/``, and returns a URL that the server can
+    download from itself.
+
+    The returned ``document_url`` can be passed directly to any tool
+    (``retrieve_chunks``, ``process_document``, ``query_spreadsheet``, etc.).
+
+    Max file size: 50 MB.
+    Allowed formats: PDF, DOCX, PPTX, XLSX, CSV, TXT, HTML, PNG, JPEG.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    # Validate extension
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+        )
+
+    # Read file content (enforce 50 MB limit)
+    content = await file.read()
+    max_size = 50 * 1024 * 1024  # 50 MB
+    if len(content) > max_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({len(content) / 1024 / 1024:.1f} MB). Max: 50 MB.",
+        )
+
+    # Save with a unique name to avoid collisions
+    safe_name = f"{uuid.uuid4().hex[:12]}_{file.filename}"
+    save_path = os.path.join(_UPLOADS_DIR, safe_name)
+    with open(save_path, "wb") as f:
+        f.write(content)
+
+    # Build the URL using the request's own host so it works from any client
+    base_url = str(request.base_url).rstrip("/")
+    document_url = f"{base_url}/uploads/{safe_name}"
+
+    logger.info(
+        "upload.success",
+        extra={"upload_name": file.filename, "size": len(content), "url": document_url},
+    )
+
+    return {
+        "filename": file.filename,
+        "saved_as": safe_name,
+        "size_bytes": len(content),
+        "document_url": document_url,
+        "usage": "Pass 'document_url' to any tool (retrieve_chunks, process_document, etc.)",
+    }
+
+
 # ── Root listing ───────────────────────────────────────────────
 
 @app.get("/", tags=["Info"])
@@ -420,6 +528,7 @@ async def root():
                 "POST /api/extract/image": "Image OCR",
             },
             "utility": {
+                "POST /api/upload": "Upload a local file, get a server-hosted URL",
                 "POST /api/detect-language": "Language detection",
                 "GET  /api/health": "System health & capabilities",
                 "POST /api/cache": "Cache stats or clear",
