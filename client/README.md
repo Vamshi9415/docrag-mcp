@@ -61,8 +61,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# The .env.example already contains MCP_API_KEY=vamshibachumcpserver
-# Just add your LLM API key:
+# Add your LLM API key:
 #   GOOGLE_API_KEY=your-gemini-key
 #   OPENAI_API_KEY=your-openai-key
 ```
@@ -117,12 +116,8 @@ User Query
 The client uses `MultiServerMCPClient` from `langchain-mcp-adapters` which:
 - Connects to the MCP server at `MCP_SERVER_URL` (default `http://127.0.0.1:8000/mcp`)
 - Uses `streamable_http` transport
-- Sends `x-api-key: <MCP_API_KEY>` as an HTTP header on every request
 - Automatically discovers all 13 available tools from the server
 - Converts MCP tool schemas into LangChain-compatible tool objects
-
-> The `MCP_API_KEY` is read from `client/.env` and must match the value set
-> in the server's `.env`. The default key is **`vamshibachumcpserver`**.
 
 ---
 
@@ -244,7 +239,6 @@ cp .env.example .env
 | `GOOGLE_API_KEY` | Yes (one of) | — | Google Gemini API key (preferred LLM) |
 | `OPENAI_API_KEY` | Yes (one of) | — | OpenAI API key (fallback LLM) |
 | `MCP_SERVER_URL` | No | `http://127.0.0.1:8000/mcp` | MCP server endpoint URL |
-| `MCP_API_KEY` | **Yes** | `vamshibachumcpserver` | Must match `MCP_API_KEY` on the server. Sent as `x-api-key` header on every MCP connection. |
 
 ### Example `.env` file
 
@@ -253,9 +247,8 @@ cp .env.example .env
 GOOGLE_API_KEY=AIza...your-gemini-key
 # OPENAI_API_KEY=sk-...your-openai-key
 
-# MCP server connection + auth
+# MCP server connection
 MCP_SERVER_URL=http://127.0.0.1:8000/mcp
-MCP_API_KEY=vamshibachumcpserver
 ```
 
 ---
@@ -344,7 +337,7 @@ Found:
 1. agent.py starts
 2. Loads .env (python-dotenv)
 3. Selects LLM based on available API keys
-4. Creates MultiServerMCPClient with `x-api-key` header from `MCP_API_KEY`
+4. Creates MultiServerMCPClient pointing at MCP_SERVER_URL
 5. Calls await client.get_tools() to discover tools
 6. langchain-mcp-adapters wraps each as a LangChain tool
 7. create_react_agent(llm, tools, prompt=SYSTEM_PROMPT) builds the agent
@@ -360,12 +353,10 @@ if os.getenv("GOOGLE_API_KEY"):
 elif os.getenv("OPENAI_API_KEY"):
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-# MCP connection — x-api-key header sent on every request
-MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+# MCP connection
 client = MultiServerMCPClient({"rag-server": {
     "url": MCP_SERVER_URL,
     "transport": "streamable_http",
-    "headers": {"x-api-key": MCP_API_KEY} if MCP_API_KEY else {},
 }})
 tools = await client.get_tools()
 agent = create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
@@ -411,15 +402,6 @@ Set GOOGLE_API_KEY or OPENAI_API_KEY in .env
 
 **Cause:** Neither LLM key is configured.
 **Fix:** Edit `client/.env` and add at least one API key.
-
-### Authentication Error from Server
-
-```json
-{"error": "Invalid or missing API key", "code": "AUTH_ERROR"}
-```
-
-**Cause:** `MCP_API_KEY` in `client/.env` is missing or doesn't match the server's key.
-**Fix:** Ensure `client/.env` contains `MCP_API_KEY=vamshibachumcpserver` (same value as the server's `.env`).
 
 ### Rate Limited
 

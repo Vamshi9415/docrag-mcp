@@ -3,9 +3,8 @@
 This folder contains **two types** of tests:
 
 | Type | Framework | Files | What it covers |
-|------|-----------|-------|----------------|
-| **Python unit + integration** | `pytest` | `test_*.py` | Config, errors, guards, cache, chunking, concurrency, downloader, REST API |
-| **PowerShell smoke tests** | Native PS | `test_mcp_auth.ps1` | MCP streamable-http auth & GET endpoints (requires running server) |
+|------|-----------|-------|---------|
+| **Python unit + integration** | `pytest` | `test_*.py` | Config, errors, guards, cache, chunking, concurrency, downloader |
 
 ---
 
@@ -40,7 +39,6 @@ pytest -v
 
 ```bash
 pytest tests/test_config.py
-pytest tests/test_api.py
 pytest tests/test_chunking.py
 ```
 
@@ -69,47 +67,16 @@ pytest -k "not real_url"
 
 | File | Layer | Tests | Key coverage |
 |------|-------|-------|-------------|
-| `conftest.py` | Fixtures | — | `MCP_API_KEY` env, `tmp_dir`, `sample_text`, `sample_csv_bytes` |
+| `conftest.py` | Fixtures | — | `tmp_dir`, `sample_text`, `sample_csv_bytes` |
 | `test_config.py` | `core/config.py` | 14 | Paths, ServerConfig, ModelConfig, CacheConfig, SecurityConfig, feature flags |
 | `test_errors.py` | `core/errors.py` | 12 | Exception hierarchy, codes, inheritance chain, parametrised |
-| `test_guards.py` | `middleware/guards.py` | 15 | Auth check, token bucket, rate limiting, URL validation, text validation |
+| `test_guards.py` | `middleware/guards.py` | 15 | Token bucket, rate limiting, URL validation, text validation |
 | `test_cache.py` | `services/cache.py` | 16 | TTL cache CRUD, expiry, eviction, size tracking, stats, public helpers, clear_all |
 | `test_chunking.py` | `services/chunking.py` | 16 | Adaptive params, scaling, chunk creation, metadata, importance score, content type |
 | `test_concurrency.py` | `core/concurrency.py` | 7 | GPU semaphore, `run_in_gpu_pool`, coalesced build, cleanup |
 | `test_downloader.py` | `services/downloader.py` | 5 | httpx client singleton, cache hit, invalid URL, real download (optional) |
-| `test_api.py` | `api.py` (FastAPI) | 24 | Auth middleware, health, root, cache, detect-language, upload, input validation |
 
 **Total: ~109 test cases**
-
----
-
-## PowerShell Smoke Tests (test_mcp_auth.ps1)
-
-These require a **running server** (they make real HTTP requests).
-
-### Step 1 — Start the server
-
-```powershell
-python -m mcp_server --transport streamable-http --port 8000
-```
-
-Wait until you see:
-
-```
-INFO:     Application startup complete.
-```
-
-### Step 2 — Run the PowerShell tests (in a separate terminal)
-
-```powershell
-.\tests\test_mcp_auth.ps1
-```
-
-Or with custom parameters:
-
-```powershell
-.\tests\test_mcp_auth.ps1 -ServerHost "127.0.0.1" -Port 8000 -ApiKey "vamshibachumcpserver"
-```
 
 ---
 
@@ -124,7 +91,7 @@ asyncio_mode = auto
 addopts = -v --tb=short
 ```
 
-The `conftest.py` automatically sets `MCP_API_KEY=test-api-key-12345` for all tests via a `monkeypatch` autouse fixture, so you do **not** need a `.env` file to run tests.
+The `conftest.py` provides shared fixtures (`sample_text`, `tmp_dir`, `sample_csv_bytes`) for all tests.
 
 ---
 
@@ -150,41 +117,30 @@ class TestMyFeature:
         assert result is not None
 ```
 
-## How Authentication Works
+## Request Flow
 
 ```
 Client Request
       │
       ▼
- AuthMiddleware (guards.py)
-      │  GET /health? ──────────────────────────────► HTTP 200  (always, no key needed)
+MCPRouter (guards.py)
       │
-      │  all other paths: check x-api-key header
+┌─────┴──────┐
+GET /health    GET /info
+(200, probe)  (200, caps)
       │
-      ├─── key missing or wrong ──► HTTP 401  (request dies here)
+everything else
       │
-      └─── key correct ────────────────────────────────────────────────────────┐
-                                                                               ▼
-                                                                     MCPRouter (guards.py)
-                                                                           │
-                                                                     ┌─────┴──────┐
-                                                               GET /health    GET /info
-                                                               (200, probe)  (200, caps)
-                                                                           │
-                                                               everything else
-                                                                           │
-                                                                           ▼
-                                                              FastMCP streamable_http_app()
-                                                                    POST /mcp only
-                                                                           │
-                                                                           ▼
-                                                                    Tool Execution
+      ▼
+FastMCP streamable_http_app()
+    POST /mcp only
+      │
+      ▼
+Tool Execution
 ```
 
-`AuthMiddleware` and `MCPRouter` are pure ASGI classes in `guards.py`. Auth
-runs before anything else, so no MCP session is ever created for an
-unauthenticated call. `GET /health` is whitelisted in `_AUTH_EXEMPT_PATHS` so
-load-balancers and Kubernetes probes can always reach it.
+`MCPRouter` is a pure ASGI class in `guards.py` that adds `/health` and `/info`
+endpoints before forwarding all other requests to FastMCP.
 
 ---
 
@@ -193,8 +149,4 @@ load-balancers and Kubernetes probes can always reach it.
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
 | `[ERROR] Server not reachable` | Server not started | Run `python -m mcp_server --transport streamable-http` |
-| Test 4 fails with 401 | Wrong key in `.env` | Check `MCP_API_KEY` in root `.env` matches `-ApiKey` param |
-| Test 6 (`/health`) fails with 401 | `_AUTH_EXEMPT_PATHS` not applied | Restart server after code changes |
-| Test 8 (`/info`) fails with 401 | Wrong key passed | Confirm `-ApiKey vamshibachumcpserver` matches root `.env` |
-| `Auth: disabled` in server startup | `MCP_API_KEY` not set | Add `MCP_API_KEY=vamshibachumcpserver` to root `.env` |
-| All tests return connection error | Port conflict | Change port: `python -m mcp_server --port 9000` and pass `-Port 9000` to the script |
+| All tests return connection error | Port conflict | Change port: `python -m mcp_server --port 9000` |

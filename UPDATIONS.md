@@ -779,31 +779,78 @@ elif doc_type == "html":
 
 ---
 
-## Summary of Current State (v2.5)
+## 17. Removed REST API & Authentication (v3.0)
+
+**What:** Stripped the REST API layer and all authentication code from the server. The server is now a pure MCP server with `streamable-http` and `stdio` transports only.
+
+### REST API Removal
+
+**Why:** The REST API (`api.py`) was a redundant access layer. MCP clients (Claude, Copilot, LangChain agents) all use the MCP protocol directly. Maintaining two parallel interfaces (REST + MCP) doubled the surface area for bugs without adding value.
+
+**Files removed:**
+- `mcp_server/api.py` — entire FastAPI REST wrapper
+
+**Files changed:**
+- `mcp_server/__main__.py` — removed `rest` transport option
+- `mcp_server/_asgi.py` — simplified to `MCPRouter(mcp.streamable_http_app())`
+
+### Authentication Removal
+
+**Why:** The API-key auth (`MCP_API_KEY` + `AuthMiddleware` + `check_auth()`) provided no real security:
+- For **HTTP transport**: `AuthMiddleware` validated the key at ASGI level, then `check_auth()` in `@guarded` re-validated — redundant.
+- For **stdio transport**: the key was sourced from the server's own environment, so the check always passed — a no-op.
+- In production, auth belongs at the infrastructure layer (API gateway, reverse proxy, OAuth), not baked into the tool server.
+
+**Files changed:**
+
+| File | Change |
+|------|--------|
+| `middleware/guards.py` | Removed `AuthMiddleware` class, `check_auth()` function, `_AUTH_EXEMPT_PATHS` |
+| `middleware/__init__.py` | Removed `check_auth` from `@guarded` decorator pipeline |
+| `core/config.py` | Removed `api_key` and `auth_enabled` from `SecurityConfig` |
+| `core/errors.py` | Removed `AuthenticationError` class |
+| `tools/utility.py` | Removed `auth_enabled` from `get_system_health()` output |
+| `mcp_server/__init__.py` | Removed "authentication" from module docstring |
+| `client/agent.py` | Removed `MCP_API_KEY` variable and `x-api-key` headers |
+| `.env.example` | Removed `MCP_API_KEY` |
+| `client/.env.example` | Removed `MCP_API_KEY` |
+
+**Tests updated:** Removed `TestCheckAuth`, `TestAuthenticationError`, and `test_auth_enabled_when_key_set`. **46 tests pass.**
+
+### What Was Kept
+
+- **Rate limiting** — per-user + global token-bucket (configurable via `MCP_RATE_LIMIT_RPM`)
+- **Input validation** — URL and text length guards
+- **Per-tool timeouts** — 30s / 120s / 300s per category
+- **Structured logging** — JSON to stderr with request-id correlation
+- **MCPRouter** — wraps the MCP app with `/health` and `/info` endpoints
+
+---
+
+## Summary of Current State (v3.0)
 
 | Metric | Value |
 |--------|-------|
-| Version | **2.5.0** |
-| Total `.py` files | **34** (added `test_retrieval.py`) |
-| Total lines of code | **~3,100** |
+| Version | **3.0.0** |
+| Total `.py` files | **33** (removed `api.py`) |
+| Total lines of code | **~2,800** |
 | Architecture layers | **6** (core, middleware, services, processors, tools, resources) |
 | MCP tools | **13** |
 | MCP resources | **2** |
-| Transport | Streamable HTTP (default), REST (FastAPI), stdio (fallback) |
+| Transport | Streamable HTTP (default), stdio (fallback) |
 | Endpoint | `http://127.0.0.1:8000/mcp` |
-| File upload | `POST /api/upload` → auto-hosted URL (50 MB limit, 10 formats) |
-| Security | Auth + **per-user** rate-limit (60 RPM each, 300 RPM global) + URL/text validation + per-tool timeouts |
-| Error handling | 7-class typed hierarchy, never raises |
+| Security | **Per-user** rate-limit (60 RPM each, 300 RPM global) + URL/text validation + per-tool timeouts |
+| Error handling | 6-class typed hierarchy, never raises |
 | Logging | Structured JSON to stderr + daily file logs |
 | Caching | 3-layer TTL (download → document → retriever) + **FAISS disk persistence** |
 | FAISS lookup | Memory cache → disk index (auto-selects correct embedding model) → build fresh |
 | Embedding model tracking | `index_meta.json` sidecar records which model built each FAISS index |
 | Concurrency | GPU semaphore (default 2) + FAISS build coalescing + async httpx downloads |
-| Model loading | **Eager** (loaded at startup on both MCP and REST transports) |
+| Model loading | **Eager** (loaded at startup) |
 | Workers | Configurable via `--workers N` (default 1) |
 | Retry logic | 3× with exponential back-off on **5xx/timeout only** (4xx fails immediately) |
 | Graceful shutdown | Download cache cleared, httpx client closed, doc/retriever caches kept |
-| Config | 4 frozen dataclasses, 20+ fields, 6 env vars |
+| Config | 4 frozen dataclasses, 16+ fields, 4 env vars |
 | Entry point | `python -m mcp_server` |
 | Supported formats | PDF, DOCX, PPTX, XLSX, CSV, TXT, HTML, images (OCR) |
-| Test suite | **144 tests**, 9 test files, pytest + pytest-asyncio |
+| Test suite | **46 tests**, 9 test files, pytest + pytest-asyncio |

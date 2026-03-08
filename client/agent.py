@@ -42,7 +42,7 @@ MCP_SERVER_URL = os.getenv(
     "MCP_SERVER_URL",
     "http://127.0.0.1:8000/mcp"
 )
-MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+
 
 # REST API base URL (derived from MCP URL — same host:port)
 _REST_BASE = re.sub(r"/mcp$", "", MCP_SERVER_URL)
@@ -69,7 +69,6 @@ async def _upload_local_file(file_path: str) -> str | None:
     if not os.path.isfile(file_path):
         return None
 
-    headers = {"x-api-key": MCP_API_KEY} if MCP_API_KEY else {}
     upload_url = f"{_REST_BASE}/api/upload"
 
     try:
@@ -79,7 +78,6 @@ async def _upload_local_file(file_path: str) -> str | None:
                 resp = await client.post(
                     upload_url,
                     files={"file": (filename, f)},
-                    headers=headers,
                 )
             resp.raise_for_status()
             data = resp.json()
@@ -138,15 +136,11 @@ async def initialize_agent():
 
     llm = get_llm()
 
-    # Build headers — include x-api-key when the server has auth enabled.
-    connection_headers = {"x-api-key": MCP_API_KEY} if MCP_API_KEY else {}
-
     client = MultiServerMCPClient(
         {
             "rag-server": {
                 "url": MCP_SERVER_URL,
                 "transport": "streamable_http",
-                "headers": connection_headers,
             }
         }
     )

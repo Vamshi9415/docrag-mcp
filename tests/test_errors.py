@@ -6,7 +6,6 @@ import pytest
 
 from mcp_server.core.errors import (
     MCPServerError,
-    AuthenticationError,
     RateLimitError,
     ValidationError,
     DownloadError,
@@ -28,22 +27,6 @@ class TestMCPServerError:
 
     def test_is_exception(self):
         assert issubclass(MCPServerError, Exception)
-
-
-class TestAuthenticationError:
-
-    def test_default_message(self):
-        e = AuthenticationError()
-        assert e.message == "Authentication required"
-        assert e.code == "AUTH_ERROR"
-
-    def test_custom_message(self):
-        e = AuthenticationError("bad key")
-        assert e.message == "bad key"
-        assert e.code == "AUTH_ERROR"
-
-    def test_inherits(self):
-        assert issubclass(AuthenticationError, MCPServerError)
 
 
 class TestRateLimitError:
@@ -85,7 +68,6 @@ class TestInheritanceChain:
     @pytest.mark.parametrize(
         "cls,args",
         [
-            (AuthenticationError, ()),
             (RateLimitError, ()),
             (ValidationError, ("x",)),
             (DownloadError, ("x",)),

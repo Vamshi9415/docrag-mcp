@@ -3,11 +3,10 @@
 Apply it **inside** ``@mcp.tool()`` to wrap every tool invocation with:
 
 1. Unique request-id assignment (``ContextVar``)
-2. Authentication check
-3. Global rate-limit check
-4. ``asyncio`` timeout enforcement
-5. Structured start / success / error logging
-6. Exception → error-dict conversion (tools never raise to the client)
+2. Global rate-limit check
+3. ``asyncio`` timeout enforcement
+4. Structured start / success / error logging
+5. Exception → error-dict conversion (tools never raise to the client)
 
 Usage::
 
@@ -29,7 +28,7 @@ from typing import Any
 from mcp_server.core.config import security_config
 from mcp_server.core.errors import MCPServerError
 from mcp_server.core.logging import get_logger, request_id_var
-from mcp_server.middleware.guards import check_auth, check_rate_limit
+from mcp_server.middleware.guards import check_rate_limit
 
 logger = get_logger("middleware")
 
@@ -69,8 +68,6 @@ def guarded(*, timeout: int | None = None):
 
             try:
                 # ── guards ────────────────────────────────────────
-                check_auth()
-
                 # Try to extract API key from kwargs for per-user rate limiting
                 _api_key = ""
                 if "api_key" in kwargs:

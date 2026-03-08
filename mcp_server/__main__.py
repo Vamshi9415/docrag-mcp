@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
 
 def main() -> None:
@@ -13,9 +12,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--transport",
-        choices=["streamable-http", "stdio", "rest"],
+        choices=["streamable-http", "stdio"],
         default="streamable-http",
-        help="Transport: streamable-http (MCP), stdio (MCP), or rest (plain REST API, default: streamable-http)",
+        help="Transport: streamable-http (MCP over HTTP) or stdio (MCP over stdin/stdout, default: streamable-http)",
     )
     parser.add_argument(
         "--host",
@@ -41,67 +40,47 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.transport == "rest":
-        # ── Plain REST API (FastAPI + Uvicorn) ────────────────────
+    if args.reload:
+        # Use uvicorn with reload to serve the MCP ASGI app
+        # NOTE: --reload and --workers>1 are mutually exclusive in uvicorn
         import uvicorn
-
-        workers = args.workers if not args.reload else 1
-        print(f"\n  RAG Document Server — REST API")
-        print(f"  Listening on http://{args.host}:{args.port}")
-        if workers > 1:
-            print(f"  Workers: {workers}")
-        print(f"  Swagger docs: http://{args.host}:{args.port}/docs\n")
+        print(f"\n  RAG Document Server — MCP (streamable-http) [DEV MODE — auto-reload]")
+        print(f"  Listening on http://{args.host}:{args.port}\n")
         uvicorn.run(
-            "mcp_server.api:create_rest_app",
+            "mcp_server._asgi:create_app",
             factory=True,
             host=args.host,
             port=args.port,
-            reload=args.reload,
+            reload=True,
+            reload_dirs=["mcp_server"],
+            reload_excludes=[
+                "__pycache__",
+                "*.pyc",
+                "request_logs",
+                "temp_files",
+            ],
+        )
+    elif args.transport == "streamable-http":
+        import uvicorn
+
+        workers = args.workers
+        print(f"\n  RAG Document Server — MCP (streamable-http)")
+        print(f"  Listening on  http://{args.host}:{args.port}")
+        print(f"  MCP endpoint: http://{args.host}:{args.port}/mcp")
+        if workers > 1:
+            print(f"  Workers: {workers}")
+        print()
+        uvicorn.run(
+            "mcp_server._asgi:create_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
             workers=workers,
         )
     else:
-        # ── MCP transport (streamable-http or stdio) ──────────────
-        if args.reload:
-            # Use uvicorn with reload to serve the MCP ASGI app
-            # NOTE: --reload and --workers>1 are mutually exclusive in uvicorn
-            import uvicorn
-            print(f"\n  RAG Document Server — MCP (streamable-http) [DEV MODE — auto-reload]")
-            print(f"  Listening on http://{args.host}:{args.port}\n")
-            uvicorn.run(
-                "mcp_server._asgi:create_app",
-                factory=True,
-                host=args.host,
-                port=args.port,
-                reload=True,
-                reload_dirs=["mcp_server"],
-                reload_excludes=[
-                    "__pycache__",
-                    "*.pyc",
-                    "request_logs",
-                    "temp_files",
-                ],
-            )
-        elif args.transport == "streamable-http":
-            import uvicorn
-
-            workers = args.workers
-            print(f"\n  RAG Document Server \u2014 MCP (streamable-http)")
-            print(f"  Listening on  http://{args.host}:{args.port}")
-            print(f"  MCP endpoint: http://{args.host}:{args.port}/mcp")
-            if workers > 1:
-                print(f"  Workers: {workers}")
-            print(f"  Auth: {'enabled (x-api-key required)' if __import__('os').getenv('MCP_API_KEY') else 'disabled (set MCP_API_KEY to enable)'}\n")
-            uvicorn.run(
-                "mcp_server._asgi:create_app",
-                factory=True,
-                host=args.host,
-                port=args.port,
-                workers=workers,
-            )
-        else:
-            from mcp_server.server import create_server
-            mcp = create_server(host=args.host, port=args.port)
-            mcp.run(transport="stdio")
+        from mcp_server.server import create_server
+        mcp = create_server(host=args.host, port=args.port)
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

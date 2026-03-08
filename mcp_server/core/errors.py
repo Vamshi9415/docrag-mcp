@@ -16,13 +16,6 @@ class MCPServerError(Exception):
         super().__init__(message)
 
 
-class AuthenticationError(MCPServerError):
-    """Raised when API-key validation fails."""
-
-    def __init__(self, message: str = "Authentication required"):
-        super().__init__(message, code="AUTH_ERROR")
-
-
 class RateLimitError(MCPServerError):
     """Raised when a client exceeds the request-rate budget."""
 

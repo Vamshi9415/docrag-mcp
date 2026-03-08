@@ -3,27 +3,24 @@
 **Pure deterministic tool server** for document processing, chunking, and
 vector retrieval. **No LLM inside** — bring your own agent.
 
-Two access modes:
-
-- **REST API** — plain HTTP JSON endpoints, works with any HTTP client
-- **MCP** — Model Context Protocol for AI agent integration (Claude, Copilot, LangChain, etc.)
+Accessible via **MCP** (Model Context Protocol) for AI agent integration (Claude, Copilot, LangChain, etc.)
+with `streamable-http` and `stdio` transports.
 
 ```
-                  ┌──────────────────┐           ┌────────────────────────────┐
-                  │  HTTP Client     │           │  AI Agent (Claude, Copilot,│
-                  │  curl · Postman  │           │  LangChain + LLM)          │
-                  └────────┬─────────┘           └─────────────┬──────────────┘
-                           │ REST JSON                         │ MCP protocol
-                           ▼                                   ▼
+                  ┌────────────────────────────┐
+                  │  AI Agent (Claude, Copilot,│
+                  │  LangChain + LLM)          │
+                  └─────────────┬──────────────┘
+                                │ MCP protocol
+                                ▼
   ╔════════════════════════════════════════════════════════════════════════════╗
   ║                   RAG Document Server (no LLM)                            ║
-  ╠═══════════════════════════════╦════════════════════════════════════════════╣
-  ║  ┌─ REST API ──────────────┐  ║  ┌─ MCP Server ──────────────────────┐   ║
-  ║  │  FastAPI · /api/*       │  ║  │  FastMCP · /mcp                   │   ║
-  ║  │  localhost:8000/api     │  ║  │  streamable-http · stdio          │   ║
-  ║  └────────────┬────────────┘  ║  └──────────────┬────────────────────┘   ║
-  ╠═══════════════╩═══════════════╩═════════════════╩════════════════════════╣
-  ║  MIDDLEWARE ─ request-id · auth · rate-limit · timeout · logging        ║
+  ╠═══════════════════════════════════════════════════════════════════════════╣
+  ║  ┌─ MCP Server ──────────────────────────────────────────────────────┐   ║
+  ║  │  FastMCP · /mcp · streamable-http · stdio                        │   ║
+  ║  └──────────────┬────────────────────────────────────────────────────┘   ║
+  ╠═════════════════╩════════════════════════════════════════════════════════╣
+  ║  MIDDLEWARE ─ request-id · rate-limit · timeout · logging               ║
   ╠═════════════════════════════════════════════════════════════════════════════╣
   ║  TOOLS (13)                           RESOURCES (2)                     ║
   ║  ├─ query.py ──────────────────┐      ├─ rag://supported-formats        ║
@@ -72,14 +69,12 @@ flowchart TB
     %% ── Transport ────────────────────────────────────────────────
     subgraph Transport[" 🔌 Transport Layer "]
         direction LR
-        REST["📡 REST API<br/>FastAPI · /api/*"]
         MCP["⚡ MCP Protocol<br/>FastMCP · /mcp<br/>streamable-http · stdio"]
     end
 
     %% ── Middleware ────────────────────────────────────────────────
     subgraph MW[" 🛡️ Middleware Pipeline "]
         direction LR
-        M1["🔑 Auth<br/>x-api-key"]
         M2["⏱️ Rate Limit<br/>Token bucket"]
         M3["✅ Validation<br/>URL · text"]
         M4["📋 Logging<br/>JSON · Request-ID"]
@@ -147,12 +142,11 @@ flowchart TB
     end
 
     %% ── Edges ────────────────────────────────────────────────────
-    C1 -- "JSON" --> REST
+    C1 -- "MCP" --> MCP
     C2 -- "MCP" --> MCP
 
-    REST --> MW
     MCP --> MW
-    M1 -.-> M2 -.-> M3 -.-> M4 -.-> M5
+    M2 -.-> M3 -.-> M4 -.-> M5
 
     MW --> ToolsGroup
 
@@ -172,11 +166,9 @@ flowchart TB
     style C2 fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#01579b
 
     style Transport fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100
-    style REST fill:#ffe0b2,stroke:#f57c00,stroke-width:1px,color:#e65100
     style MCP fill:#ffe0b2,stroke:#f57c00,stroke-width:1px,color:#e65100
 
     style MW fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#b71c1c
-    style M1 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
     style M2 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
     style M3 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
     style M4 fill:#ffcdd2,stroke:#e53935,stroke-width:1px,color:#b71c1c
@@ -215,24 +207,23 @@ flowchart TB
 
 1.  [Quick Start](#quick-start)
 2.  [Client Agent](#client-agent)
-3.  [REST API Reference](#rest-api-reference)
-4.  [MCP Tools Reference](#mcp-tools-reference)
-5.  [Project Structure](#project-structure)
-6.  [Configuration Deep Dive](#configuration-deep-dive)
-7.  [Security & Middleware Pipeline](#security--middleware-pipeline)
-8.  [Caching Architecture](#caching-architecture)
-9.  [Document Processors — Internals](#document-processors--internals)
-10. [Adaptive Chunking Algorithm](#adaptive-chunking-algorithm)
-11. [Retrieval Engine](#retrieval-engine)
-12. [Eager Model Loading](#eager-model-loading)
-13. [Structured Logging](#structured-logging)
-14. [Error Hierarchy](#error-hierarchy)
-15. [Data Schemas](#data-schemas)
-16. [Language Detection](#language-detection)
-17. [Supported Formats](#supported-formats)
-18. [Environment Variables](#environment-variables)
-19. [Client Configuration Examples](#client-configuration-examples)
-20. [Development Guide](#development-guide)
+3.  [MCP Tools Reference](#mcp-tools-reference)
+4.  [Project Structure](#project-structure)
+5.  [Configuration Deep Dive](#configuration-deep-dive)
+6.  [Security & Middleware Pipeline](#security--middleware-pipeline)
+7.  [Caching Architecture](#caching-architecture)
+8.  [Document Processors — Internals](#document-processors--internals)
+9.  [Adaptive Chunking Algorithm](#adaptive-chunking-algorithm)
+10. [Retrieval Engine](#retrieval-engine)
+11. [Eager Model Loading](#eager-model-loading)
+12. [Structured Logging](#structured-logging)
+13. [Error Hierarchy](#error-hierarchy)
+14. [Data Schemas](#data-schemas)
+15. [Language Detection](#language-detection)
+16. [Supported Formats](#supported-formats)
+17. [Environment Variables](#environment-variables)
+18. [Client Configuration Examples](#client-configuration-examples)
+19. [Development Guide](#development-guide)
 
 ---
 
@@ -251,12 +242,11 @@ pip install -r requirements.txt
 
 ### 2. Set environment variables
 
-The server uses `.env` for configuration. The only **required** setting is
-`MCP_API_KEY` which authenticates every MCP and REST request:
+The server uses `.env` for configuration. No required settings —
+sensible defaults are built in:
 
 ```bash
 # .env (copy from .env.example and customise)
-MCP_API_KEY=vamshibachumcpserver      # authenticate all requests
 # MCP_RATE_LIMIT_RPM=60               # requests per minute per user (default: 60)
 # MCP_REQUEST_TIMEOUT=300             # seconds per tool call (default: 300)
 # GPU_CONCURRENCY=2                   # max concurrent FAISS build/retrieval ops (default: 2)
@@ -268,17 +258,12 @@ MCP_API_KEY=vamshibachumcpserver      # authenticate all requests
 ### 3. Start the server
 
 ```bash
-# ── REST API (for backend / direct HTTP usage) ────────────────────
-python -m mcp_server --transport rest                    # localhost:8000
-python -m mcp_server --transport rest --host 0.0.0.0 --port 9000
-
-# ── MCP transport (for AI agent integration) ──────────────────────
+# ── MCP transport (default: streamable-http) ──────────────────────
 python -m mcp_server                                     # streamable-http, localhost:8000
 python -m mcp_server --transport stdio                   # stdio (piped)
 
 # ── Production (multi-worker for concurrent users) ────────────────
 python -m mcp_server --workers 4                         # 4 worker processes
-python -m mcp_server --transport rest --workers 4         # REST with 4 workers
 python -m mcp_server --workers 4 --host 0.0.0.0          # expose to network
 
 # ── Development mode (auto-reload on code changes) ────────────────
@@ -287,7 +272,7 @@ python -m mcp_server --reload                            # watches mcp_server/ f
 
 | CLI Argument    | Choices                                 | Default              |
 |-----------------|-----------------------------------------|----------------------|
-| `--transport`   | `streamable-http`, `stdio`, `rest`      | `streamable-http`    |
+| `--transport`   | `streamable-http`, `stdio`              | `streamable-http`    |
 | `--host`        | Any bind address                        | `127.0.0.1`          |
 | `--port`        | Any port number                         | `8000`               |
 | `--workers`     | Number of uvicorn worker processes      | `1`                  |
@@ -299,19 +284,8 @@ python -m mcp_server --reload                            # watches mcp_server/ f
 
 ### 4. Verify
 
-```powershell
-# REST mode — PowerShell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/health
-
-# List all available endpoints
-Invoke-RestMethod -Uri http://127.0.0.1:8000/
-```
-
-```bash
-# REST mode — curl
-curl http://127.0.0.1:8000/api/health
-curl http://127.0.0.1:8000/
-```
+The server exposes `/health` and `/info` endpoints via the MCPRouter.
+Use any MCP client or the bundled `client/agent.py` to connect and verify tools are available.
 
 ---
 
@@ -399,165 +373,6 @@ raw extraction, etc.) based on your natural-language query.
 
 ---
 
-## REST API Reference
-
-All endpoints accept/return JSON. The REST layer (`api.py`) is a thin
-FastAPI wrapper that delegates directly to the same service functions used
-by the MCP tools. CORS is enabled for all origins. Interactive Swagger docs
-are available at `http://127.0.0.1:8000/docs`.
-
-### HTTP Middleware (applied to every request)
-
-1. **Request ID** — `uuid4().hex[:12]` generated and returned as `X-Request-Id` header
-2. **API Key** — checked via `x-api-key` header → HTTP 401 on mismatch
-3. **Rate Limit** — per-user + global token-bucket → HTTP 429 when exhausted
-
-### Document Endpoints
-
-| Method | Endpoint | Request Body | Description |
-|--------|----------|--------------|-------------|
-| `POST` | `/api/process-document` | `{"document_url": "..."}` | Extract text, tables, images, URLs from any document |
-| `POST` | `/api/chunk-document` | `{"document_url": "..."}` | Split document into scored, RAG-ready chunks |
-| `POST` | `/api/retrieve-chunks` | `{"document_url": "...", "query": "...", "top_k": 5}` | Vector search (FAISS + reranking) for relevant chunks |
-| `POST` | `/api/query-spreadsheet` | `{"document_url": "...", "search_value": "..."}` | Pandas row lookup in XLSX/CSV files |
-
-### Extraction Endpoints
-
-| Method | Endpoint | Request Body | Description |
-|--------|----------|--------------|-------------|
-| `POST` | `/api/extract/pdf` | `{"document_url": "..."}` | PDF text with layout preservation |
-| `POST` | `/api/extract/docx` | `{"document_url": "..."}` | DOCX text with headings & tables |
-| `POST` | `/api/extract/pptx` | `{"document_url": "..."}` | PPTX slides, notes, tables |
-| `POST` | `/api/extract/xlsx` | `{"document_url": "..."}` | XLSX multi-sheet table extraction |
-| `POST` | `/api/extract/csv` | `{"document_url": "..."}` | CSV tabular content extraction |
-| `POST` | `/api/extract/image` | `{"document_url": "..."}` | Image OCR (pytesseract) |
-
-### Utility Endpoints
-
-| Method | Endpoint | Request Body | Description |
-|--------|----------|--------------|-------------|
-| `POST` | `/api/upload` | `multipart/form-data` (field: `file`) | Upload a local file, get a server-hosted URL |
-| `POST` | `/api/detect-language` | `{"text": "..."}` | Multi-round language detection |
-| `GET`  | `/api/health` | — | System health, models, capabilities |
-| `POST` | `/api/cache` | `{"action": "stats"\|"clear"}` | Cache stats or clear |
-| `GET`  | `/` | — | List all available endpoints |
-
-### Example Requests
-
-```powershell
-# Health check
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/health
-
-# Process a document (extract everything)
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/process-document `
-  -Method POST -ContentType "application/json" `
-  -Body '{"document_url":"https://example.com/report.pdf"}'
-
-# Chunk a document (RAG-ready pieces)
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/chunk-document `
-  -Method POST -ContentType "application/json" `
-  -Body '{"document_url":"https://example.com/report.pdf"}'
-
-# Retrieve relevant chunks via vector search
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/retrieve-chunks `
-  -Method POST -ContentType "application/json" `
-  -Body '{"document_url":"https://example.com/report.pdf","query":"What are the key findings?","top_k":5}'
-
-# Extract PDF text
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/extract/pdf `
-  -Method POST -ContentType "application/json" `
-  -Body '{"document_url":"https://example.com/report.pdf"}'
-
-# Extract CSV tables
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/extract/csv `
-  -Method POST -ContentType "application/json" `
-  -Body '{"document_url":"https://example.com/data.csv"}'
-
-# Detect language
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/detect-language `
-  -Method POST -ContentType "application/json" `
-  -Body '{"text":"Bonjour, comment allez-vous?"}'
-```
-
-```bash
-# curl equivalents
-curl http://127.0.0.1:8000/api/health
-
-curl -X POST http://127.0.0.1:8000/api/retrieve-chunks \
-  -H "Content-Type: application/json" \
-  -d '{"document_url":"https://example.com/report.pdf","query":"key findings","top_k":5}'
-
-# Upload a local file and get a server-hosted URL
-curl -X POST http://127.0.0.1:8000/api/upload \
-  -F "file=@/path/to/report.pdf"
-# Response: {"document_url": "http://127.0.0.1:8000/uploads/a1b2c3_report.pdf", ...}
-
-# Then use the returned URL with any tool
-curl -X POST http://127.0.0.1:8000/api/retrieve-chunks \
-  -H "Content-Type: application/json" \
-  -d '{"document_url":"http://127.0.0.1:8000/uploads/a1b2c3_report.pdf","query":"key findings"}'
-```
-
-### Authentication (REST)
-
-`MCP_API_KEY` is set, so every REST request must include the `x-api-key` header:
-
-```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/api/health `
-  -Headers @{ "x-api-key" = "vamshibachumcpserver" }
-```
-
-```bash
-curl http://127.0.0.1:8000/api/health -H "x-api-key: vamshibachumcpserver"
-```
-
-### Authentication (MCP / streamable-http)
-
-The same key is enforced at the ASGI level on the `/mcp` endpoint.
-MCP clients must send the header on every connection:
-
-```python
-# langchain-mcp-adapters
-MultiServerMCPClient({
-    "rag-server": {
-        "url": "http://127.0.0.1:8000/mcp",
-        "transport": "streamable_http",
-        "headers": {"x-api-key": "vamshibachumcpserver"},
-    }
-})
-```
-
-The client agent (`client/agent.py`) reads `MCP_API_KEY` from its `.env` and
-passes it automatically — no manual setup needed if you use the bundled client.
-
-### Response Envelope
-
-All tool responses follow a consistent structure. On success (example for `process_document`):
-
-```json
-{
-  "content": "extracted text...",
-  "content_length": 12345,
-  "metadata": { "source": "...", "doc_type": "pdf" },
-  "tables": [],
-  "images": [],
-  "urls": [],
-  "detected_language": "en",
-  "detected_language_name": "English"
-}
-```
-
-On error (tools never raise — all exceptions are caught):
-
-```json
-{
-  "error": "Rate limit exceeded",
-  "code": "RATE_LIMITED"
-}
-```
-
----
-
 ## MCP Tools Reference
 
 ### Document Tools
@@ -625,9 +440,8 @@ On error (tools never raise — all exceptions are caught):
 │
 ├── mcp_server/                  # ─── Server package ───
 │   ├── __init__.py
-│   ├── __main__.py              # CLI: --transport rest|streamable-http|stdio --reload --workers N
+│   ├── __main__.py              # CLI: --transport streamable-http|stdio --reload --workers N
 │   ├── server.py                # FastMCP instance, lifespan, tool registration
-│   ├── api.py                   # FastAPI REST wrapper (plain JSON endpoints)
 │   ├── _asgi.py                 # ASGI factory for --reload mode (uvicorn)
 │   │
 │   ├── core/
@@ -640,7 +454,7 @@ On error (tools never raise — all exceptions are caught):
 │   │
 │   ├── middleware/
 │   │   ├── __init__.py          # @guarded() decorator — full middleware chain
-│   │   └── guards.py            # Auth, per-user + global rate-limit, URL/text validation
+│   │   └── guards.py            # Per-user + global rate-limit, URL/text validation, MCPRouter
 │   │
 │   ├── services/
 │   │   ├── cache.py             # Generic _TTLCache, 3 singleton layers
@@ -745,8 +559,6 @@ Runs once at import time:
 
 | Field | Type | Default | Env Var |
 |-------|------|---------|---------|
-| `api_key` | `str` | `"vamshibachumcpserver"` | `MCP_API_KEY` |
-| `auth_enabled` | `bool` | `True` when `MCP_API_KEY` is set | `MCP_API_KEY` |
 | `rate_limit_rpm` | `int` | `60` | `MCP_RATE_LIMIT_RPM` |
 | `max_url_length` | `int` | `2048` | — |
 | `max_text_length` | `int` | `100,000` | — |
@@ -756,30 +568,20 @@ Runs once at import time:
 
 ## Security & Middleware Pipeline
 
-Every tool invocation (both MCP and REST) passes through the `@guarded(timeout=...)`
+Every tool invocation passes through the `@guarded(timeout=...)`
 decorator. This decorator implements a **complete middleware chain** that ensures
 tools never raise exceptions to the client.
 
 ### Middleware Steps (in order)
 
 ```
-Request → [1] Request ID → [2] Auth → [3] Rate Limit → [4] Execute w/ Timeout → [5] Log → Response
+Request → [1] Request ID → [2] Rate Limit → [3] Execute w/ Timeout → [4] Log → Response
 ```
 
 1. **Request ID Generation** — `uuid4().hex[:12]` stored in a `ContextVar` for log
    correlation across the entire call stack.
 
-2. **Authentication** — enforced at **two layers**:
-   - **MCP transport (streamable-http):** `AuthMiddleware` (ASGI) intercepts every
-     HTTP request to `/mcp` and returns HTTP 401 if the `x-api-key` header is
-     missing or incorrect. This runs before FastMCP even sees the request.
-   - **REST API:** `guard_middleware` (FastAPI) checks the same header on every
-     `/api/*` request.
-   - **MCP tools (`check_auth()`):** secondary guard called inside `@guarded()`
-     for defence-in-depth; raises `AuthenticationError` if auth is enabled but
-     the key is empty.
-
-3. **Rate Limiting** (`check_rate_limit(tool_name, api_key)`) — two-tier token-bucket:
+2. **Rate Limiting** (`check_rate_limit(tool_name, api_key)`) — two-tier token-bucket:
    - **Per-user bucket**: Capacity = `rate_limit_rpm` (default 60) per API key
    - **Global bucket**: 5× per-user rate (default 300 rpm) — server-wide safety cap
    - Refill rate = `rpm / 60.0` tokens per second
@@ -787,16 +589,16 @@ Request → [1] Request ID → [2] Auth → [3] Rate Limit → [4] Execute w/ Ti
    - Per-user buckets are evicted FIFO at 1000 entries to prevent memory leaks
    - Raises `RateLimitError` when per-user or global tokens exhausted
 
-4. **Execution with Timeout** — `asyncio.wait_for(fn(...), timeout=...)`:
+3. **Execution with Timeout** — `asyncio.wait_for(fn(...), timeout=...)`:
    - Document tools: 300 s
    - Extraction tools: 120 s
    - Utility tools: 30 s
    - Raises `TimeoutError` (caught by the decorator, returned as `{"code": "TIMEOUT"}`)
 
-5. **Structured Logging** — emits `tool.start`, `tool.success` (with elapsed time),
+4. **Structured Logging** — emits `tool.start`, `tool.success` (with elapsed time),
    or `tool.timeout` / `tool.known_error` / `tool.unhandled_error` events.
 
-6. **Error Conversion** — all exceptions are caught and converted to error dicts:
+5. **Error Conversion** — all exceptions are caught and converted to error dicts:
    - `MCPServerError` subclass → `{"error": exc.message, "code": exc.code}`
    - `asyncio.TimeoutError` → `{"error": "...", "code": "TIMEOUT"}`
    - Any other `Exception` → `{"error": "...", "code": "INTERNAL_ERROR"}`
@@ -1123,7 +925,6 @@ string for programmatic matching plus a human-readable `.message`:
 
 ```
 MCPServerError(Exception)              code="INTERNAL_ERROR"
-├── AuthenticationError                code="AUTH_ERROR"        msg="Authentication required"
 ├── RateLimitError                     code="RATE_LIMITED"      msg="Rate limit exceeded"
 ├── ValidationError                    code="VALIDATION_ERROR"
 ├── DownloadError                      code="DOWNLOAD_ERROR"
@@ -1133,7 +934,7 @@ MCPServerError(Exception)              code="INTERNAL_ERROR"
 
 The `@guarded` decorator catches all of these and converts them to
 `{"error": ..., "code": ...}` dicts — tools **never raise** to the MCP client
-or REST consumer.
+or MCP consumer.
 
 Additional timeout errors are surfaced as `{"code": "TIMEOUT"}`.
 
@@ -1204,7 +1005,6 @@ Gujarati, Punjabi, Urdu, Chinese, Japanese (18 languages).
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MCP_API_KEY` | **Yes** | `vamshibachumcpserver` | Authenticates all MCP and REST requests via `x-api-key` header |
 | `MCP_RATE_LIMIT_RPM` | No | `60` | Per-user rate limit (requests/minute); global cap is 5× this value |
 | `MCP_REQUEST_TIMEOUT` | No | `300` | Default tool timeout in seconds |
 | `GPU_CONCURRENCY` | No | `2` | Max concurrent FAISS build/retrieval operations (GPU semaphore) |
@@ -1220,7 +1020,6 @@ Gujarati, Punjabi, Urdu, Chinese, Japanese (18 languages).
 | `GOOGLE_API_KEY` | Yes (one of) | — | Gemini LLM (default) |
 | `OPENAI_API_KEY` | Yes (one of) | — | OpenAI fallback |
 | `MCP_SERVER_URL` | No | `http://127.0.0.1:8000/mcp` | MCP server endpoint |
-| `MCP_API_KEY` | **Yes** | `vamshibachumcpserver` | Must match server's `MCP_API_KEY` |
 
 ### Optional Tracing Variables
 
@@ -1234,30 +1033,6 @@ Gujarati, Punjabi, Urdu, Chinese, Japanese (18 languages).
 ---
 
 ## Client Configuration Examples
-
-### REST (any HTTP client — Python)
-
-```python
-import requests
-
-r = requests.post("http://127.0.0.1:8000/api/retrieve-chunks", json={
-    "document_url": "https://example.com/report.pdf",
-    "query": "key findings",
-    "top_k": 5,
-})
-print(r.json())
-```
-
-### REST (JavaScript / fetch)
-
-```javascript
-const res = await fetch("http://127.0.0.1:8000/api/process-document", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ document_url: "https://example.com/report.pdf" }),
-});
-const data = await res.json();
-```
 
 ### VS Code Copilot — MCP (`.vscode/mcp.json`)
 
@@ -1303,9 +1078,6 @@ const data = await res.json();
 ### Running the Server
 
 ```bash
-# REST API (with Swagger docs at /docs)
-python -m mcp_server --transport rest 2>&1
-
 # MCP server (streamable-http)
 python -m mcp_server 2>&1
 
@@ -1314,9 +1086,6 @@ python -m mcp_server --transport stdio
 
 # Development mode (auto-reload on code changes)
 python -m mcp_server --reload
-
-# Smoke test
-curl http://127.0.0.1:8000/api/health
 ```
 
 ### Adding a New Tool
@@ -1332,8 +1101,7 @@ curl http://127.0.0.1:8000/api/health
        return {"result": "..."}
    ```
 3. The tool is automatically registered via module import in `server.py`
-4. Add a corresponding REST endpoint in `api.py` if needed
-5. Update `resources/__init__.py` to include the tool in `rag://tool-descriptions`
+4. Update `resources/__init__.py` to include the tool in `rag://tool-descriptions`
 
 ### Adding a New Document Processor
 

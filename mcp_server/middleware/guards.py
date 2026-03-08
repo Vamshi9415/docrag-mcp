@@ -1,4 +1,4 @@
-"""Security guards: authentication, rate limiting, and input validation.
+"""Security guards: rate limiting and input validation.
 
 These are pure functions (no I/O) so they can be called synchronously
 inside the ``guarded`` decorator without awaiting anything.
@@ -11,27 +11,10 @@ import time
 import threading
 
 from mcp_server.core.config import security_config
-from mcp_server.core.errors import AuthenticationError, RateLimitError, ValidationError
+from mcp_server.core.errors import RateLimitError, ValidationError
 from mcp_server.core.logging import get_logger
 
 logger = get_logger("guards")
-
-# ═══════════════════════════════════════════════════════════════════
-# Authentication
-# ═══════════════════════════════════════════════════════════════════
-
-def check_auth() -> None:
-    """Verify API key if authentication is enabled (``MCP_API_KEY`` is set).
-
-    In streamable-http transport the key is enforced at the env-var level;
-    extend this function to inspect transport-level headers when the MCP SDK
-    supports it.
-    """
-    if not security_config.auth_enabled:
-        return
-    if not security_config.api_key:
-        raise AuthenticationError("MCP_API_KEY is configured but empty")
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Rate Limiting — per-user token-bucket algorithm
@@ -163,77 +146,27 @@ def validate_text(text: str, field_name: str = "text") -> None:
         )
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ASGI Middleware — HTTP-level auth for MCP streamable-http transport
-# ═══════════════════════════════════════════════════════════════════
-
-# Paths that bypass authentication — reachable by infra probes without a key
-_AUTH_EXEMPT_PATHS: frozenset[str] = frozenset({"/health"})
-
-
-class AuthMiddleware:
-    """ASGI middleware that enforces ``x-api-key`` authentication on the
-    MCP streamable-http transport.
-
-    Wrapped around ``MCPRouter(mcp.streamable_http_app())`` so that every
-    HTTP request — tool calls, SSE streams, and preflight pings — must
-    carry a valid ``x-api-key`` header when ``MCP_API_KEY`` is configured.
-    Auth is skipped when ``MCP_API_KEY`` is not set.
-
-    ``GET /health`` is always exempt so load-balancers and k8s liveness
-    probes can reach it without credentials.
-    """
-
-    def __init__(self, app) -> None:
-        self.app = app
-
-    async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] == "http" and security_config.auth_enabled:
-            path = scope.get("path", "")
-            if path not in _AUTH_EXEMPT_PATHS:
-                headers = dict(scope.get("headers", []))
-                provided_key = headers.get(b"x-api-key", b"").decode()
-                if provided_key != security_config.api_key:
-                    logger.warning(
-                        "auth.rejected",
-                        extra={"detail": "invalid or missing x-api-key on MCP transport"},
-                    )
-                    body = b'{"error": "Invalid or missing API key", "code": "AUTH_ERROR"}'
-                    await send({
-                        "type": "http.response.start",
-                        "status": 401,
-                        "headers": [
-                            (b"content-type", b"application/json"),
-                            (b"content-length", str(len(body)).encode()),
-                        ],
-                    })
-                    await send({"type": "http.response.body", "body": body})
-                    return
-        await self.app(scope, receive, send)
-
-
 class MCPRouter:
     """Lightweight ASGI router that adds standard GET endpoints to the MCP
     streamable-http transport, then forwards everything else to FastMCP.
 
-    Routes handled here (must sit *inside* AuthMiddleware):
+    Routes:
 
-        GET /health   — liveness probe, NO auth required (whitelisted above)
-                        Returns: {status, transport, auth_enabled, models_loaded}
+        GET /health   — liveness probe
+                        Returns: {status, transport, models_loaded}
 
-        GET /info     — server capabilities, auth required
-                        Returns: {server, version, mcp_endpoint, auth, features,
+        GET /info     — server capabilities
+                        Returns: {server, version, mcp_endpoint, features,
                                   supported_formats, device}
 
     All other paths/methods → FastMCP ``streamable_http_app()``.
 
     Deployment stack (outer → inner)::
 
-        AuthMiddleware
-            └─ MCPRouter
-                ├─ GET /health    (probe — no auth)
-                ├─ GET /info      (capabilities — auth)
-                └─ *              FastMCP (/mcp POST + SSE)
+        MCPRouter
+            ├─ GET /health    (probe)
+            ├─ GET /info      (capabilities)
+            └─ *              FastMCP (/mcp POST + SSE)
     """
 
     def __init__(self, mcp_app) -> None:
@@ -255,7 +188,7 @@ class MCPRouter:
 
     @staticmethod
     async def _health(send) -> None:
-        """GET /health — liveness/readiness probe (no auth)."""
+        """GET /health — liveness/readiness probe."""
         import json
         from mcp_server.core.models import models_loaded
 
@@ -263,7 +196,6 @@ class MCPRouter:
             "status": "healthy",
             "transport": "streamable-http",
             "mcp_endpoint": "/mcp",
-            "auth_enabled": security_config.auth_enabled,
             "models_loaded": models_loaded(),
         }, indent=2).encode()
 
@@ -279,7 +211,7 @@ class MCPRouter:
 
     @staticmethod
     async def _info(send) -> None:
-        """GET /info — server capabilities (auth required)."""
+        """GET /info — server capabilities."""
         import json
         from mcp_server.core.config import (
             RERANK_AVAILABLE, OCR_AVAILABLE, LANG_DETECT_AVAILABLE,
@@ -291,10 +223,6 @@ class MCPRouter:
             "version": server_config.version,
             "transport": "streamable-http",
             "mcp_endpoint": "/mcp",
-            "auth": {
-                "enabled": security_config.auth_enabled,
-                "header": "x-api-key",
-            },
             "features": {
                 "adaptive_chunking": True,
                 "vector_retrieval": True,

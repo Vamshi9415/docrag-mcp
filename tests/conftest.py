@@ -23,8 +23,8 @@ if PROJECT_ROOT not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _set_test_env(monkeypatch):
-    """Set a known API key for every test so auth logic is deterministic."""
-    monkeypatch.setenv("MCP_API_KEY", "test-api-key-12345")
+    """Set deterministic env vars for tests."""
+    pass
 
 
 @pytest.fixture()

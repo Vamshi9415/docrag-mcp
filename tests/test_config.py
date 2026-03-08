@@ -68,13 +68,6 @@ class TestCacheConfig:
 
 class TestSecurityConfig:
 
-    def test_auth_enabled_when_key_set(self):
-        """The conftest fixture sets MCP_API_KEY so auth should be enabled."""
-        from mcp_server.core.config import SecurityConfig
-        cfg = SecurityConfig()
-        assert cfg.auth_enabled is True
-        assert cfg.api_key != ""
-
     def test_rate_limit_positive(self):
         from mcp_server.core.config import security_config
         assert security_config.rate_limit_rpm > 0

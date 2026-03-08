@@ -76,7 +76,6 @@ async def get_system_health() -> dict[str, Any]:
             "language_detection": LANG_DETECT_AVAILABLE,
         },
         "security": {
-            "auth_enabled": security_config.auth_enabled,
             "rate_limit_rpm": security_config.rate_limit_rpm,
             "request_timeout_s": security_config.request_timeout,
         },

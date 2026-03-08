@@ -1,4 +1,4 @@
-"""Tests for mcp_server.middleware.guards — auth, rate limiting, validation."""
+"""Tests for mcp_server.middleware.guards — rate limiting, validation."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from mcp_server.core.errors import (
     ValidationError,
 )
 from mcp_server.middleware.guards import (
-    check_auth,
     check_rate_limit,
     validate_url,
     validate_text,
@@ -19,18 +18,6 @@ from mcp_server.middleware.guards import (
     _user_buckets,
     _user_buckets_lock,
 )
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Authentication
-# ═══════════════════════════════════════════════════════════════════
-
-class TestCheckAuth:
-
-    def test_passes_when_key_set(self):
-        """With MCP_API_KEY set by conftest, check_auth should not raise."""
-        # check_auth only verifies the env var exists and isn't empty
-        check_auth()  # should not raise
 
 
 # ═══════════════════════════════════════════════════════════════════

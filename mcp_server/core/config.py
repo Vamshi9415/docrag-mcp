@@ -94,9 +94,7 @@ class CacheConfig:
 
 @dataclass(frozen=True)
 class SecurityConfig:
-    """Authentication, rate-limiting, and input-size guards."""
-    api_key: str = field(default_factory=lambda: os.getenv("MCP_API_KEY", ""))
-    auth_enabled: bool = field(default_factory=lambda: bool(os.getenv("MCP_API_KEY")))
+    """Rate-limiting and input-size guards."""
     rate_limit_rpm: int = int(os.getenv("MCP_RATE_LIMIT_RPM", "60"))
     max_url_length: int = 2048
     max_text_length: int = 100_000
