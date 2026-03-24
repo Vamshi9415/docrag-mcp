@@ -1,8 +1,8 @@
-"""Three-layer TTL cache: download → document → retriever.
+"""
+Three-layer TTL + LRU cache: download → document → retriever.
 
 Each layer is an independent ``_TTLCache`` instance with configurable
-max-entry and TTL limits.  Public helpers are thin wrappers so the rest
-of the code-base never touches the internals.
+max-entry and TTL limits.
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from collections import OrderedDict
 
 from mcp_server.core.config import cache_config
 from mcp_server.core.logging import get_logger
@@ -20,7 +21,7 @@ logger = get_logger("cache")
 
 
 # ---------------------------------------------------------------------------
-# Generic TTL cache
+# Generic TTL + LRU cache
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -31,15 +32,17 @@ class _CacheEntry:
 
 
 class _TTLCache:
-    """Thread-safe, size-bounded TTL cache."""
+    """Thread-safe, size-bounded TTL + LRU cache."""
 
     def __init__(self, max_entries: int, ttl: int, name: str, max_bytes: int = 0):
         self.max_entries = max_entries
         self.ttl = ttl
         self.name = name
         self.max_bytes = max_bytes
-        self._store: Dict[str, _CacheEntry] = {}
+
+        self._store: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._lock = threading.Lock()
+
         self._total_bytes = 0
         self._hits = 0
         self._misses = 0
@@ -49,30 +52,46 @@ class _TTLCache:
     def get(self, key: str) -> Optional[Any]:
         with self._lock:
             entry = self._store.get(key)
+
             if entry is None:
                 self._misses += 1
                 return None
+
+            # TTL check
             if time.time() > entry.expires_at:
                 self._evict_key(key)
                 self._misses += 1
                 return None
+
+            # ✅ LRU update
+            self._store.move_to_end(key)
+
             self._hits += 1
             return entry.value
 
     def put(self, key: str, value: Any, size_bytes: int = 0) -> None:
         with self._lock:
             self._evict_expired()
+
             if key in self._store:
                 self._evict_key(key)
-            if self.max_bytes and self._total_bytes + size_bytes > self.max_bytes:
-                self._evict_oldest()
-            while len(self._store) >= self.max_entries:
-                self._evict_oldest()
+
+            # Evict based on size or count
+            while (
+                (self.max_bytes and self._total_bytes + size_bytes > self.max_bytes)
+                or len(self._store) >= self.max_entries
+            ):
+                self._evict_lru()
+
             self._store[key] = _CacheEntry(
                 value=value,
                 expires_at=time.time() + self.ttl,
                 size_bytes=size_bytes,
             )
+
+            # Mark as most recently used
+            self._store.move_to_end(key)
+
             self._total_bytes += size_bytes
 
     def clear(self) -> int:
@@ -84,17 +103,14 @@ class _TTLCache:
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
+            total = self._hits + self._misses
             return {
                 "name": self.name,
                 "entries": len(self._store),
                 "max_entries": self.max_entries,
                 "hits": self._hits,
                 "misses": self._misses,
-                "hit_rate": (
-                    f"{self._hits / (self._hits + self._misses) * 100:.1f}%"
-                    if (self._hits + self._misses)
-                    else "N/A"
-                ),
+                "hit_rate": f"{(self._hits / total * 100):.1f}%" if total else "N/A",
                 "total_bytes": self._total_bytes,
             }
 
@@ -107,15 +123,14 @@ class _TTLCache:
 
     def _evict_expired(self) -> None:
         now = time.time()
-        expired = [k for k, v in self._store.items() if now > v.expires_at]
-        for k in expired:
+        expired_keys = [k for k, v in self._store.items() if now > v.expires_at]
+        for k in expired_keys:
             self._evict_key(k)
 
-    def _evict_oldest(self) -> None:
-        if not self._store:
-            return
-        oldest_key = min(self._store, key=lambda k: self._store[k].expires_at)
-        self._evict_key(oldest_key)
+    def _evict_lru(self) -> None:
+        if self._store:
+            key, entry = self._store.popitem(last=False)  # LRU
+            self._total_bytes -= entry.size_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -171,24 +186,15 @@ def put_cached_retriever(key: str, retriever) -> None:
 
 
 def get_retriever_with_disk_fallback(url_hash: str, embeddings=None):
-    """Try memory cache first, then fall back to disk-persisted FAISS index.
-
-    If *embeddings* is ``None``, the correct model is auto-selected from
-    the saved ``index_meta.json`` sidecar (prevents vector-space mismatch).
-
-    Returns ``(retriever, source)`` where *source* is ``'memory'``,
-    ``'disk'``, or ``None`` if not found anywhere.
-    """
-    # 1. Memory cache
+    """Try memory cache first, then disk."""
     cached = retriever_cache.get(url_hash)
     if cached is not None:
         return cached, "memory"
 
-    # 2. Disk persistence
     from mcp_server.services.retrieval import EnhancedRetriever
+
     loaded = EnhancedRetriever.load_from_disk(url_hash, embeddings)
     if loaded is not None:
-        # Promote back into memory cache for fast subsequent access
         retriever_cache.put(url_hash, loaded)
         return loaded, "disk"
 
@@ -196,13 +202,11 @@ def get_retriever_with_disk_fallback(url_hash: str, embeddings=None):
 
 
 def put_retriever_with_disk(url_hash: str, retriever) -> None:
-    """Store retriever in memory cache AND persist FAISS index to disk."""
     retriever_cache.put(url_hash, retriever)
     retriever.save_to_disk(url_hash)
 
 
 def clear_faiss_disk() -> int:
-    """Delete all persisted FAISS indexes from disk."""
     import shutil
     from mcp_server.core.config import FAISS_INDEX_PATH
 
@@ -213,12 +217,12 @@ def clear_faiss_disk() -> int:
             if os.path.isdir(entry_path):
                 shutil.rmtree(entry_path, ignore_errors=True)
                 count += 1
+
     logger.info("cache.clear_faiss_disk", extra={"indexes_removed": count})
     return count
 
 
 def clear_all() -> Dict[str, int]:
-    """Flush every cache layer (memory + disk) and return eviction counts."""
     result = {
         "download_cleared": download_cache.clear(),
         "document_cleared": document_cache.clear(),
@@ -230,11 +234,11 @@ def clear_all() -> Dict[str, int]:
 
 
 def faiss_disk_stats() -> Dict[str, Any]:
-    """Return stats about persisted FAISS indexes on disk."""
     from mcp_server.core.config import FAISS_INDEX_PATH
 
     total_size = 0
     index_count = 0
+
     if os.path.isdir(FAISS_INDEX_PATH):
         for entry in os.listdir(FAISS_INDEX_PATH):
             entry_path = os.path.join(FAISS_INDEX_PATH, entry)
@@ -244,6 +248,7 @@ def faiss_disk_stats() -> Dict[str, Any]:
                     fp = os.path.join(entry_path, f)
                     if os.path.isfile(fp):
                         total_size += os.path.getsize(fp)
+
     return {
         "name": "faiss_disk",
         "persisted_indexes": index_count,
